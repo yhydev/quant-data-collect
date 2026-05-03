@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Binance 套利交易平台 - 技术文档</title>
+    <!-- Mermaid.js -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: #f5f5f5;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        header {
+            background: linear-gradient(135deg, #1a237e, #0d47a1);
+            color: white;
+            padding: 40px 20px;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        h2 {
+            color: #1a237e;
+            border-bottom: 2px solid #1a237e;
+            padding-bottom: 10px;
+            margin: 40px 0 20px;
+        }
+        
+        h3 {
+            color: #0d47a1;
+            margin: 25px 0 15px;
+        }
+        
+        .nav {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .nav a {
+            color: #1a237e;
+            text-decoration: none;
+            margin: 0 15px;
+            padding: 8px 15px;
+            border-radius: 4px;
+            display: inline-block;
+        }
+        
+        .nav a:hover {
+            background: #e8eaf6;
+        }
+        
+        .diagram-container {
+            background: white;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow-x: auto;
+        }
+        
+        .diagram-title {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #1a237e;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        pre {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        
+        code {
+            background: #f0f0f0;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Consolas', 'Monaco', monospace;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: white;
+        }
+        
+        th, td {
+            border: 1px solid #ddd;
+            padding: 12px;
+            text-align: left;
+        }
+        
+        th {
+            background: #1a237e;
+            color: white;
+        }
+        
+        tr:nth-child(even) {
+            background: #f9f9f9;
+        }
+        
+        .note {
+            background: #fff3e0;
+            border-left: 4px solid #ff9800;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        
+        .api-card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 15px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .api-method {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 4px;
+            font-weight: bold;
+            color: white;
+            margin-right: 10px;
+        }
+        
+        .method-get { background: #4caf50; }
+        .method-post { background: #2196f3; }
+        .method-put { background: #ff9800; }
+        .method-delete { background: #f44336; }
+        
+        footer {
+            text-align: center;
+            padding: 30px;
+            color: #666;
+            margin-top: 50px;
+        }
+        
+        @media print {
+            .nav { display: none; }
+            .diagram-container { break-inside: avoid; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>📊 Binance 套利交易平台 - 技术文档</h1>
+        <p>包含专业的 Mermaid.js 架构图和时序图</p>
+    </header>
+    
+    <div class="container">
+        <div class="nav">
+            <a href="#architecture">系统架构</a>
+            <a href="#sequence">时序图</a>
+            <a href="#flow">流程图</a>
+            <a href="#state">状态机</a>
+            <a href="#database">数据库</a>
+            <a href="#api">API接口</a>
+        </div>
+        
+        <!-- 系统架构图 -->
+        <section id="architecture">
+            <h2>1. 系统架构图</h2>
+            
+            <h3>1.1 整体系统架构</h3>
+            <div class="diagram-container">
+                <div class="diagram-title">图 1.1: 系统架构图</div>
+                <div class="mermaid">
+flowchart TB
+                    subgraph CLIENT["用户端"]
+                        USER["用户前端"]
+                    end
+                    
+                    subgraph API_SERVER["API 服务器"]
+                        FASTAPI["FastAPI 应用"]
+                        
+                        subgraph API_ROUTES["API 路由"]
+                            A1["/open-position"]
+                            A2["/close-position"]
+                            A3["/funding-rates"]
+                            A4["/positions"]
+                            A5["/health"]
+                            A6["/earnings"]
+                        end
+                    end
+                    
+                    subgraph SCHEDULER["调度层"]
+                        PS["PositionScheduler<br/>开仓调度器"]
+                        CS["CloseScheduler<br/>平仓调度器"]
+                        OW["OrderWatcher<br/>订单监控"]
+                    end
+                    
+                    subgraph SERVICE["服务层"]
+                        LM["LockManager<br/>并发锁管理"]
+                        PM["PortfolioManager<br/>持仓管理"]
+                    end
+                    
+                    subgraph DATA["数据层"]
+                        DB["PostgreSQL<br/>+ SQLAlchemy AsyncORM"]
+                    end
+                    
+                    subgraph EXTERNAL["Binance 交易所"]
+                        BINANCE["Binance API"]
+                    end
+                    
+                    USER -->|HTTP| FASTAPI
+                    FASTAPI --> A1
+                    FASTAPI --> A2
+                    FASTAPI --> A3
+                    FASTAPI --> A4
+                    FASTAPI --> A5
+                    FASTAPI --> A6
+                    
+                    A1 --> PS
+                    A2 --> CS
+                    PS <--> LM
+                    CS <--> LM
+                    PS <--> PM
+                    CS <--> PM
+                    
+                    PM <--> DB
+                    
+                    PS --> OW
+                    OW --> BINANCE
+                    
+                    PS --> BINANCE
+
+                    style CLIENT fill:#e1f5fe,stroke:#0277dd
+                    style API_SERVER fill:#e8f5e8,stroke:#2e7d32
+                    style SCHEDULER fill:#fff3e0,stroke:#ff9800
+                    style SERVICE fill:#f3e5f5,stroke:#7b1fa2
+                    style DATA fill:#e0f2f1,stroke:#00695c
+                    style EXTERNAL fill:#ffebee,stroke:#c62828
+                </div>
+            </div>
+            
+            <h3>1.2 调度器内部架构</h3>
+            <div class="diagram-container">
+                <div class="diagram-title">图 1.2: 调度器架构</div>
+                <div class="mermaid">
+flowchart TB
+                    subgraph APSCHEDULER["APScheduler 调度框架"]
+                        subgraph POSITION["PositionScheduler 开仓调度器"]
+                            J1["Job1: wake_pending_batches<br/>唤醒待执行批次"]
+                            J2["Job2: execute_running_batches<br/>执行批次任务"]
+                            OW["OrderWatcher<br/>订单状态监控"]
+                        end
+                        
+                        subgraph CLOSE["CloseScheduler 平仓调度器"]
+                            J3["Job1: wake_pending_closes<br/>唤醒待平仓"]
+                            J4["Job2: execute_closes<br/>执行平仓"]
+                        end
+                    end
+                    
+                    subgraph PHASES["执行阶段"]
+                        P1["PENDING"]
+                        P2["FIRST_ORDER_OPEN"]
+                        P3["FIRST_ORDER_WAIT"]
+                        P4["FIRST_FILLED"]
+                        P5["SECOND_ORDER_OPEN"]
+                        P6["SECOND_ORDER_WAIT"]
+                        P7["COMPLETED"]
+                    end
+                    
+                    J1 --> J2
+                    J2 --> OW
+                    J3 --> J4
+                    
+                    P1 --> P2
+                    P2 --> P3
+                    P3 --> P4
+                    P4 --> P5
+                    P5 --> P6
+                    P6 --> P7
+
+                    style APSCHEDULER fill:#fff3e0,stroke:#ff9800
+                    style PHASES fill:#e8f5e8,stroke:#4caf50
+                </div>
+            </div>
+        </section>
+        
+        <!-- 时序图 -->
+        <section id="sequence">
+            <h2>2. 时序图</h2>
+            
+            <h3>2.1 开仓完整流程</h3>
+            <div class="diagram-container">
+                <div class="diagram-title">图 2.1: 用户发起开仓请求 → 调度器执行</div>
+                <div class="mermaid">
+sequenceDiagram
+                    participant USER as 用户
+                    participant API as API服务器
+                    participant DB as 数据库
+                    participant LM as LockManager
+                    participant PS as PositionScheduler
+                    participant C as Collector
+                    participant T as Trader
+                    participant OW as OrderWatcher
+
+                    USER->>API: POST /api/open-position
+                    API->>LM: acquire(contract, "OPEN")
+                    alt 锁获取成功
+                        API->>DB: INSERT PositionExecute
+                        API->>DB: INSERT BatchExecute(s)
+                        DB-->>API: 返回记录
+                        API->>LM: release(contract)
+                        API-->>USER: 200 OK
+                    else 锁获取失败
+                        API-->>USER: 400 已被锁定
+                    end
+
+                    activate PS
+                    PS->>DB: SELECT PENDING batches
+                    DB-->>PS: 返回批次列表
+                    PS->>DB: UPDATE status=RUNNING, phase=PENDING
+                    deactivate PS
+
+                    activate PS
+                    PS->>C: get_contract_ticker(symbol)
+                    C-->>PS: 返回行情
+                    PS->>C: get_spot_price(symbol)
+                    C-->>PS: 返回现货价
+                    PS->>DB: UPDATE 价格
+
+                    PS->>T: open_futures_short/buy_spot
+                    T-->>PS: 返回order_id
+                    PS->>DB: UPDATE phase=FIRST_ORDER_WAIT
+
+                    PS->>OW: watch_order()
+                    activate OW
+                    loop 轮询/WebSocket
+                        OW->>T: get_order_status()
+                        T-->>OW: 状态
+                    end
+                    OW-->>PS: trigger_phase(FIRST_FILLED)
+                    deactivate OW
+
+                    PS->>T: buy_spot/open_futures_short
+                    T-->>PS: 返回order_id
+                    PS->>DB: UPDATE phase=SECOND_ORDER_WAIT
+
+                    activate OW
+                    loop 轮询/WebSocket
+                        OW->>T: get_order_status()
+                        T-->>OW: 状态
+                    end
+                    OW-->>PS: trigger_phase(COMPLETED)
+                    deactivate OW
+
+                    PS->>T: transfer_to_savings()
+                    PS->>DB: UPDATE COMPLETED
+                    PS->>LM: release(contract)
+                </div>
+            </div>
+            
+            <h3>2.2 订单执行阶段</h3>
+            <div class="diagram-container">
+                <div class="diagram-title">图 2.2: 订单执行七阶段</div>
+                <div class="mermaid">
+sequenceDiagram
+                    participant S as Scheduler
+                    participant DB as 数据库
+                    participant C as Collector
+                    participant T as Trader
+
+                    Note over S,DB: === 阶段1: 初始化参数 ===
+
+                    S->>DB: 读取order_sequence配置
+                    DB-->>S: 返回配置
+                    
+                    S->>C: get_contract_ticker(symbol)
+                    C-->>S: mark_price
+                    
+                    S->>C: get_spot_price(symbol)
+                    C-->>S: bid_price
+                    
+                    S->>DB: UPDATE phase=FIRST_ORDER_OPEN
+
+                    Note over S,DB: === 阶段2: 开第一边订单 ===
+
+                    S->>T: open_futures_short/buy_spot
+                    T-->>S: order_id
+                    S->>DB: UPDATE phase=FIRST_ORDER_WAIT
+
+                    Note over S,DB: === 阶段3: 等待成交 (由OrderWatcher监控) ===
+
+                    Note over S,DB: === 阶段4: 第一边已成交 ===
+
+                    S->>DB: UPDATE phase=SECOND_ORDER_OPEN
+
+                    Note over S,DB: === 阶段5: 开第二边订单 ===
+
+                    S->>T: buy_spot/open_futures_short
+                    T-->>S: order_id
+                    S->>DB: UPDATE phase=SECOND_ORDER_WAIT
+
+                    Note over S,DB: === 阶段6: 等待成交 (由OrderWatcher监控) ===
+
+                    Note over S,DB: === 阶段7: 完成 ===
+
+                    S->>T: transfer_to_savings()
+                    S->>DB: UPDATE status=COMPLETED
+                    S->>DB: 释放锁
+                </div>
+            </div>
+            
+            <h3>2.3 OrderWatcher 监控流程</h3>
+            <div class="diagram-container">
+                <div class="diagram-title">图 2.3: WebSocket + 轮询混合监控</div>
+                <div class="mermaid">
+sequenceDiagram
+                    participant OW as OrderWatcher
+                    participant WS as Binance WebSocket
+                    participant T as Trader
+                    participant S as Scheduler
+
+                    OW->>WS: connect(wss://fstream.binance.com/stream)
+                    WS-->>OW: connected
+                    
+                    OW->>WS: SUBSCRIBE symbol@executionReport
+                    WS-->>OW: subscribed
+                    
+                    loop 监听消息
+                        WS->>OW: 消息
+                        alt orderStatus=FILLED
+                            OW->>S: trigger_phase(FIRST_FILLED)
+                        else orderStatus=CANCELLED
+                            OW->>S: trigger_phase(PENDING)
+                        end
+                    end
+                    
+                    note over OW: WebSocket断开时使用轮询备用
+                    
+                    loop 轮询 [1,1,2,2,5,5,10,30,60]秒
+                        OW->>T: get_order_status()
+                        alt status=FILLED
+                            OW->>S: trigger_phase()
+                            OW->>S: unwatch()
+                        else status=CANCELLED
+                            OW->>S: trigger_phase(PENDING)
+                            OW->>S: unwatch()
+                        end
+                    end
+                </div>
+            </div>
+            
+            <h3>2.4 并发锁流程</h3>
+            <div class="diagram-container">
+                <div class="diagram-title">图 2.4: LockManager 并发控制</div>
+                <div class="mermaid">
+sequenceDiagram
+                    participant LM as LockManager
+                    participant DB as 数据库
+                    participant OP as 操作请求
+
+                    OP->>LM: acquire("BTCUSDT", "OPEN")
+                    LM->>DB: SELECT locked=true WHERE symbol="BTCUSDT"
+                    
+                    alt 已有锁
+                        DB-->>LM: 返回lock记录
+                        LM-->>OP: return False
+                    else 无锁
+                        DB-->>LM: return None
+                        LM->>DB: INSERT lock_info
+                        LM-->>OP: return True
+                    end
+
+                    OP->>LM: release("BTCUSDT")
+                    LM->>DB: SELECT WHERE symbol="BTCUSDT"
+                    DB-->>LM: 返回lock
+                    
+                    alt 找到记录
+                        LM->>DB: UPDATE locked=false
+                    end
+                </div>
+            </div>
+        </section>
+        
+        <!-- 流程图 -->
+        <section id="flow">
+            <h2>3. 流程图</h2>
+            
+            <h3>3.1 开仓业务流</h3>
+            <div class="diagram-container">
+                <div class="diagram-title">图 3.1: 开仓业务流</div>
+                <div class="mermaid">
+flowchart TD
+                    A[用户 POST /api/open-position] --> B{锁可用?}
+                    B -->|否| E[返回 400 错误]
+                    B -->|是| C[获取锁]
+                    C --> D[创建 PositionExecute]
+                    D --> F[创建 BatchExecute]
+                    F --> G[释放锁]
+                    G --> H[返回成功]
+                    
+                    H -.-> I[调度器后台执行]
+                    
+                    I --> J[唤醒 PENDING 批次]
+                    J --> K[获取行情]
+                    K --> L[开第一边订单]
+                    L --> M[等待成交]
+                    M --> N{第一边成交?}
+                    N -->|否| M
+                    N -->|是| O[开第二边订单]
+                    O --> P[等待成交]
+                    P --> Q{第二边成交?}
+                    Q -->|否| P
+                    Q -->|是| R[转入理财]
+                    R --> S[标记完成]
+                    S --> T[释放锁]
+                    
+                    style A fill:#e3f2fd,stroke:#1565c0
+                    style I fill:#fff3e0,stroke:#ff9800
+                    style S fill:#c8e6c9,stroke:#2e7d32
+                </div>
+            </div>
+        </section>
+        
+        <!-- 状态机 -->
+        <section id="state">
+            <h2>4. 状态机</h2>
+            
+            <h3>4.1 订单执行状态机</h3>
+            <div class="diagram-container">
+                <div class="diagram-title">图 4.1: 订单执行状态机</div>
+                <div class="mermaid">
+stateDiagram-v2
+                    [*] --> PENDING: 用户开仓
+    
+                    PENDING --> FIRST_ORDER_OPEN: INIT初始化
+                    FIRST_ORDER_OPEN --> FIRST_ORDER_WAIT: ORDER开单
+    
+                    FIRST_ORDER_WAIT --> FIRST_ORDER_WAIT: 轮询中
+                    FIRST_ORDER_WAIT --> FIRST_FILLED: FILLED成交
+                    FIRST_ORDER_WAIT --> PENDING: CANCELLED取消
+    
+                    FIRST_FILLED --> SECOND_ORDER_OPEN: NEXT下一阶段
+    
+                    SECOND_ORDER_OPEN --> SECOND_ORDER_WAIT: ORDER开单
+    
+                    SECOND_ORDER_WAIT --> SECOND_ORDER_WAIT: 轮询中
+                    SECOND_ORDER_WAIT --> COMPLETED: FILLED成交
+                    SECOND_ORDER_WAIT --> PENDING: CANCELLED取消
+    
+                    COMPLETED --> [*]: 完成
+    
+                    FIRST_ORDER_WAIT --> COMPLETED: TIMEOUT超时
+                    SECOND_ORDER_WAIT --> COMPLETED: TIMEOUT超时
+    
+                    FIRST_ORDER_OPEN --> COMPLETED: ERROR错误
+                    SECOND_ORDER_OPEN --> COMPLETED: ERROR错误
+                </div>
+            </div>
+        </section>
+        
+        <!-- 数据库 -->
+        <section id="database">
+            <h2>5. 数据库模型</h2>
+            
+            <h3>5.1 ER 图</h3>
+            <div class="diagram-container">
+                <div class="diagram-title">图 5.1: 数据库 ER 图</div>
+                <div class="mermaid">
+erDiagram
+                    POSITION_EXECUTE ||--o{ BATCH_EXECUTE : contains
+                    BATCH_EXECUTE ||--o{ POSITION_ORDER : has
+    
+                    POSITION_EXECUTE {
+                        int id PK
+                        string contract
+                        int batch_num
+                        string execute_status
+                        float batch_position_value
+                        string offset
+                        datetime created_at
+                        datetime updated_at
+                        string complete_reason
+                    }
+                    
+                    BATCH_EXECUTE {
+                        int id PK
+                        int position_execute_id FK
+                        int timeout
+                        string execute_status
+                        string offset
+                        string order_sequence
+                        float contract_price
+                        float spot_price
+                        float batch_value
+                        string phase
+                        string first_side_order_id
+                        float first_side_filled_price
+                        string second_side_order_id
+                        float second_side_filled_price
+                    }
+                    
+                    LOCK_INFO {
+                        int id PK
+                        string symbol UK
+                        string operation
+                        boolean locked
+                        datetime locked_at
+                        datetime released_at
+                    }
+                    
+                    EARNING {
+                        int id PK
+                        string contract
+                        float amount
+                        float funding_earn
+                        float funding_rate
+                        float interest_earn
+                        float pnl
+                        float total_earn
+                        string status
+                    }
+                </div>
+            </div>
+        </section>
+        
+        <!-- API 接口 -->
+        <section id="api">
+            <h2>6. API 接口</h2>
+            
+            <div class="api-card">
+                <span class="api-method method-post">POST</span>
+                <code>/api/open-position</code>
+                <p>开仓接口</p>
+                <pre>
+Body: {
+    "contract": "BTCUSDT",
+    "batch_num": 1,
+    "batch_position_value": 1000,
+    "order_plugin": "futures_first"
+}
+Response: { "status": "success", "message": "..." }
+                </pre>
+            </div>
+            
+            <div class="api-card">
+                <span class="api-method method-post">POST</span>
+                <code>/api/close-position</code>
+                <p>平仓接口</p>
+                <pre>
+Body: { "position_id": 1 }
+Response: { "status": "success", "message": "..." }
+                </pre>
+            </div>
+            
+            <div class="api-card">
+                <span class="api-method method-get">GET</span>
+                <code>/api/funding-rates</code>
+                <p>资金费率查询</p>
+                <pre>Response: [{ "symbol": "BTCUSDT", "rate": 0.0001, ... }]</pre>
+            </div>
+            
+            <div class="api-card">
+                <span class="api-method method-get">GET</span>
+                <code>/api/positions</code>
+                <p>持仓列表</p>
+            </div>
+            
+            <div class="api-card">
+                <span class="api-method method-get">GET</span>
+                <code>/api/health</code>
+                <p>健康检查</p>
+                <pre>Response: { "status": "ok", "database": "healthy" }</pre>
+            </div>
+        </section>
+        
+        <!-- 配置说明 -->
+        <section id="config">
+            <h2>7. 配置说明</h2>
+            
+            <table>
+                <thead>
+                    <tr>
+                        <th>变量</th>
+                        <th>默认值</th>
+                        <th>说明</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>POSTGRES_HOST</td>
+                        <td>localhost</td>
+                        <td>数据库地址</td>
+                    </tr>
+                    <tr>
+                        <td>POSTGRES_PORT</td>
+                        <td>5432</td>
+                        <td>数据库端口</td>
+                    </tr>
+                    <tr>
+                        <td>POSTGRES_USER</td>
+                        <td>postgres</td>
+                        <td>数据库用户</td>
+                    </tr>
+                    <tr>
+                        <td>POSTGRES_PASSWORD</td>
+                        <td>postgres</td>
+                        <td>数据库密码</td>
+                    </tr>
+                    <tr>
+                        <td>BINANCE_API_KEY</td>
+                        <td>-</td>
+                        <td>币安API Key</td>
+                    </tr>
+                    <tr>
+                        <td>BINANCE_SECRET_KEY</td>
+                        <td>-</td>
+                        <td>币安Secret Key</td>
+                    </tr>
+                    <tr>
+                        <td>CORS_ORIGINS</td>
+                        <td>http://localhost:3000,...</td>
+                        <td>CORS允许的源</td>
+                    </tr>
+                    <tr>
+                        <td>DB_POOL_SIZE</td>
+                        <td>5</td>
+                        <td>数据库连接池大小</td>
+                    </tr>
+                    <tr>
+                        <td>LOG_LEVEL</td>
+                        <td>INFO</td>
+                        <td>日志级别</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+    </div>
+    
+    <footer>
+        <p>📊 Binance 套利交易平台 - 技术文档 | 使用 Mermaid.js 渲染</p>
+    </footer>
+    
+    <script>
+        // 初始化 Mermaid
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'default',
+            securityLevel: 'loose',
+            flowchart: {
+                useMaxWidth: true,
+                htmlLabels: true
+            },
+            sequence: {
+                useMaxWidth: true,
+                diagramMarginX: 50,
+                actorMargin: 50,
+                noteMargin: 10,
+                messageMargin: 35
+            }
+        });
+    </script>
+</body>
+</html>
