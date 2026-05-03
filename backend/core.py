@@ -60,7 +60,7 @@ class PositionScheduler:
         """
         定时任务1: 唤醒pending批次
         - 将没有RUNNING的合约的PENDING批次转为RUNNING
-        - 同一合约只能有一个RUNNING
+        - 同一合约只唤醒RUNNING为空闲的ID最小的批次
         """
         session = get_session()
         
@@ -72,10 +72,10 @@ class PositionScheduler:
         for batch in running:
             contracts_running.add(batch.position.contract)
         
-        # 查找需要唤醒的PENDING批次（合约无RUNNING）
+        # 查找需要唤醒的PENDING批次，按ID排序（确保唤醒最小的）
         pending = session.query(BatchExecute).filter(
             BatchExecute.execute_status == 'PENDING'
-        ).all()
+        ).order_by(BatchExecute.id).all()
         
         woken = 0
         for batch in pending:
@@ -103,20 +103,22 @@ class PositionScheduler:
         定时任务2: 执行批次
         - 初始化参数（计算挂单价、开仓顺序）
         - 执行订单操作
+        - 同一合约只处理RUNNING中ID最小的批次
         """
         session = get_session()
         
-        # 获取所有RUNNING批次
+        # 获取所有RUNNING批次，按ID排序（确保顺序执行）
         running = session.query(BatchExecute).filter(
             BatchExecute.execute_status == 'RUNNING'
-        ).all()
+        ).order_by(BatchExecute.id).all()
         
-        # 每tick每个合约只处理一次
+        # 每tick每个合约只处理ID最小的一个
         contracts_processed = set()
         
         for batch in running:
             contract = batch.position.contract
             
+            # 跳过：同合约已处理（由于已按ID排序，第一个就是ID最小的）
             if contract in contracts_processed:
                 continue
             contracts_processed.add(contract)
