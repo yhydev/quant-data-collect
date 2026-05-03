@@ -1,6 +1,6 @@
 """
 Core scheduler for position execution using APScheduler.
-Handles parameter initialization and order execution.
+Each phase is extracted into independent methods for testability.
 """
 from datetime import datetime
 from decimal import Decimal
@@ -32,7 +32,7 @@ class PositionScheduler:
     
     def start(self):
         """Start scheduler with APScheduler."""
-        # Job 1: 唤醒pending批次 - 将无RUNNING的合约批次转为RUNNING
+        # Job 1: 唤醒pending批次
         self.scheduler.add_job(
             self._wake_pending_batches,
             trigger=IntervalTrigger(seconds=1),
@@ -40,7 +40,7 @@ class PositionScheduler:
             replace_existing=True
         )
         
-        # Job 2: 执行批次 - 初始化参数 + 执行订单
+        # Job 2: 执行批次
         self.scheduler.add_job(
             self._execute_running_batches,
             trigger=IntervalTrigger(seconds=1),
@@ -56,11 +56,12 @@ class PositionScheduler:
         self.scheduler.shutdown()
         print("APScheduler stopped")
     
+    # ===== Job 1: 唤醒pending批次 =====
     async def _wake_pending_batches(self):
         """
         定时任务1: 唤醒pending批次
         - 将没有RUNNING的合约的PENDING批次转为RUNNING
-        - 同一合约只唤醒RUNNING为空闲的ID最小的批次
+        - 同一合约只唤醒ID最小的批次
         """
         session = get_session()
         
@@ -72,7 +73,7 @@ class PositionScheduler:
         for batch in running:
             contracts_running.add(batch.position.contract)
         
-        # 查找需要唤醒的PENDING批次，按ID排序（确保唤醒最小的）
+        # 按ID排序，唤醒最小的
         pending = session.query(BatchExecute).filter(
             BatchExecute.execute_status == 'PENDING'
         ).order_by(BatchExecute.id).all()
@@ -81,13 +82,12 @@ class PositionScheduler:
         for batch in pending:
             contract = batch.position.contract
             
-            # 跳过：合约已有RUNNING
             if contract in contracts_running:
                 continue
             
-            # 唤醒批次
+            # 唤醒
             batch.execute_status = 'RUNNING'
-            batch.phase = 'PENDING'  # 设置初始阶段
+            batch.phase = 'PENDING'
             batch.updated_at = datetime.utcnow()
             session.commit()
             
@@ -98,27 +98,26 @@ class PositionScheduler:
         if woken > 0:
             print(f"Woke {woken} pending batches")
     
+    # ===== Job 2: 执行批次 =====
     async def _execute_running_batches(self):
         """
         定时任务2: 执行批次
-        - 初始化参数（计算挂单价、开仓顺序）
-        - 执行订单操作
-        - 同一合约只处理RUNNING中ID最小的批次
+        - 按ID升序处理每个RUNNING批次
+        - 同一合约只处理ID最小的
+        - 检查超时后调用 _execute_phase()
         """
         session = get_session()
         
-        # 获取所有RUNNING批次，按ID排序（确保顺序执行）
+        # 按ID排序获取RUNNING批次
         running = session.query(BatchExecute).filter(
             BatchExecute.execute_status == 'RUNNING'
         ).order_by(BatchExecute.id).all()
         
-        # 每tick每个合约只处理ID最小的一个
         contracts_processed = set()
         
         for batch in running:
             contract = batch.position.contract
             
-            # 跳过：同合约已处理（由于已按ID排序，第一个就是ID最小的）
             if contract in contracts_processed:
                 continue
             contracts_processed.add(contract)
@@ -141,153 +140,227 @@ class PositionScheduler:
                 batch.complete_reason = f'ERROR: {str(e)}'
                 session.commit()
     
+    # ===== Phase执行：按当前phase调用对应方法 =====
     async def _execute_phase(self, batch: BatchExecute):
-        """执行单个批次的阶段"""
-        session = get_session()
+        """根据phase执行对应阶段"""
         phase = batch.phase
         
-        # ===== INIT_PARAMS: 初始化参数 =====
-        if phase == 'PENDING' or phase == 'INIT_PARAMS':
-            # 计算订单顺序和挂单价
-            order_seq = self.order_plugin.get_order_sequence()
-            contract = batch.position.contract
-            
-            # 获取价格
-            contract_ticker = await self.collector.get_contract_ticker(contract)
-            spot_price = await self.collector.get_spot_price(contract)
-            
-            # 计算挂单价（含滑点）
-            if order_seq.value == 'futures_first':
-                contract_price = float(contract_ticker.mark_price * (1 + SLIPPAGE))
-                spot_price_val = float(spot_price.ask_price)
-            else:
-                spot_price_val = float(spot_price.ask_price * (1 + SLIPPAGE))
-                contract_price = float(contract_ticker.mark_price)
-            
-            # 保存参数
-            batch.order_sequence = order_seq.value
-            batch.contract_price = contract_price
-            batch.spot_price = spot_price_val
-            batch.phase = 'FIRST_ORDER_OPEN'
-            batch.updated_at = datetime.utcnow()
-            session.commit()
-            print(f"Batch {batch.id} params: order={order_seq.value}, contract={contract_price}, spot={spot_price_val}")
-        
-        # ===== FIRST_ORDER_OPEN: 第一边挂单 =====
+        if phase == 'PENDING':
+            await self._phase_init_params(batch)
         elif phase == 'FIRST_ORDER_OPEN':
-            amount = batch.batch_value or 1000
-            
-            if batch.order_sequence == 'futures_first':
-                result = await self.trader.open_futures_short(
-                    batch.position.contract,
-                    amount,
-                    batch.contract_price
-                )
-            else:
-                result = await self.trader.buy_spot(
-                    batch.position.contract,
-                    amount,
-                    batch.spot_price
-                )
-            
-            if result.success:
-                batch.first_side_order_id = str(result.order_id)
-                batch.phase = 'FIRST_ORDER_WAIT'
-                batch.updated_at = datetime.utcnow()
-                session.commit()
-            else:
-                batch.execute_status = 'COMPLETED'
-                batch.complete_reason = f'ERROR: {result.message}'
-                session.commit()
-        
-        # ===== FIRST_ORDER_WAIT: 第一边等待成交 =====
+            await self._phase_first_order_open(batch)
         elif phase == 'FIRST_ORDER_WAIT':
-            if batch.first_side_order_id:
-                order_status = await self.trader.get_order_status(
-                    batch.position.contract,
-                    int(batch.first_side_order_id)
-                )
-                
-                if order_status.get('status') == 'FILLED':
-                    batch.first_side_filled_price = float(
-                        order_status.get('avgPrice', 
-                        batch.contract_price if batch.order_sequence == 'futures_first' else batch.spot_price)
-                    )
-                    batch.phase = 'FIRST_FILLED'
-                    batch.updated_at = datetime.utcnow()
-                    session.commit()
-        
-        # ===== FIRST_FILLED: 第一边已成交 =====
+            await self._phase_first_order_wait(batch)
         elif phase == 'FIRST_FILLED':
-            if batch.order_sequence == 'futures_first':
-                batch.phase = 'SPOT_TRANSFER'
-            else:
-                batch.phase = 'SECOND_ORDER_OPEN'
+            await self._phase_first_filled(batch)
+        elif phase == 'SPOT_TRANSFER':
+            await self._phase_spot_transfer(batch)
+        elif phase == 'SECOND_ORDER_OPEN':
+            await self._phase_second_order_open(batch)
+        elif phase == 'SECOND_ORDER_WAIT':
+            await self._phase_second_order_wait(batch)
+    
+    # ===== 阶段1: 初始化参数 =====
+    async def _phase_init_params(self, batch: BatchExecute):
+        """
+        阶段1: 初始化参数
+        - 获取订单顺序（futures_first / spot_first）
+        - 获取合约价格（Mark Price）和现货价格（Ask Price）
+        - 计算挂单价（含0.1%滑点）
+        - 保存到批次记录
+        """
+        session = get_session()
+        
+        # 获取订单顺序
+        order_seq = self.order_plugin.get_order_sequence()
+        contract = batch.position.contract
+        
+        # 获取价格
+        contract_ticker = await self.collector.get_contract_ticker(contract)
+        spot_price = await self.collector.get_spot_price(contract)
+        
+        # 计算挂单价（含滑点）
+        if order_seq.value == 'futures_first':
+            contract_price = float(contract_ticker.mark_price * (1 + SLIPPAGE))
+            spot_price_val = float(spot_price.ask_price)
+        else:
+            spot_price_val = float(spot_price.ask_price * (1 + SLIPPAGE))
+            contract_price = float(contract_ticker.mark_price)
+        
+        # 保存参数
+        batch.order_sequence = order_seq.value
+        batch.contract_price = contract_price
+        batch.spot_price = spot_price_val
+        batch.phase = 'FIRST_ORDER_OPEN'
+        batch.updated_at = datetime.utcnow()
+        session.commit()
+        
+        print(f"Batch {batch.id} params: order={order_seq.value}, contract={contract_price}, spot={spot_price_val}")
+    
+    # ===== 阶段2: 第一边挂单 =====
+    async def _phase_first_order_open(self, batch: BatchExecute):
+        """
+        阶段2: 第一边挂单
+        - futures_first: 做空合约（open_futures_short）
+        - spot_first: 买入现货（buy_spot）
+        - 保存订单ID，进入等待阶段
+        """
+        session = get_session()
+        amount = batch.batch_value or 1000
+        
+        if batch.order_sequence == 'futures_first':
+            result = await self.trader.open_futures_short(
+                batch.position.contract,
+                amount,
+                batch.contract_price
+            )
+        else:
+            result = await self.trader.buy_spot(
+                batch.position.contract,
+                amount,
+                batch.spot_price
+            )
+        
+        if result.success:
+            batch.first_side_order_id = str(result.order_id)
+            batch.phase = 'FIRST_ORDER_WAIT'
             batch.updated_at = datetime.utcnow()
             session.commit()
-        
-        # ===== SPOT_TRANSFER: 现货转入理财 =====
-        elif phase == 'SPOT_TRANSFER':
-            result = await self.trader.transfer_to_savings(
-                batch.position.contract,
-                batch.batch_value or 1000
-            )
-            
-            if result.success:
-                batch.phase = 'SECOND_ORDER_OPEN'
-                batch.updated_at = datetime.utcnow()
-                session.commit()
-        
-        # ===== SECOND_ORDER_OPEN: 第二边挂单 =====
-        elif phase == 'SECOND_ORDER_OPEN':
-            amount = batch.batch_value or 1000
-            
-            if batch.order_sequence == 'futures_first':
-                result = await self.trader.buy_spot(
-                    batch.position.contract,
-                    amount,
-                    batch.spot_price
-                )
-            else:
-                result = await self.trader.open_futures_short(
-                    batch.position.contract,
-                    amount,
-                    batch.contract_price
-                )
-            
-            if result.success:
-                batch.second_side_order_id = str(result.order_id)
-                batch.phase = 'SECOND_ORDER_WAIT'
-                batch.updated_at = datetime.utcnow()
-                session.commit()
-            else:
-                batch.execute_status = 'COMPLETED'
-                batch.complete_reason = f'ERROR: {result.message}'
-                session.commit()
-        
-        # ===== SECOND_ORDER_WAIT: 第二边等待成交 =====
-        elif phase == 'SECOND_ORDER_WAIT':
-            if batch.second_side_order_id:
-                order_status = await self.trader.get_order_status(
-                    batch.position.contract,
-                    int(batch.second_side_order_id)
-                )
-                
-                if order_status.get('status') == 'FILLED':
-                    batch.second_side_filled_price = float(
-                        order_status.get('avgPrice',
-                        batch.spot_price if batch.order_sequence == 'futures_first' else batch.contract_price)
-                    )
-                    batch.execute_status = 'COMPLETED'
-                    batch.complete_reason = 'SUCCESS'
-                    batch.phase = 'COMPLETED'
-                    batch.updated_at = datetime.utcnow()
-                    session.commit()
-                    
-                    await self._check_position_complete(batch.position_execute_id)
+        else:
+            batch.execute_status = 'COMPLETED'
+            batch.complete_reason = f'ERROR: {result.message}'
+            session.commit()
     
+    # ===== 阶段3: 第一边等待成交 =====
+    async def _phase_first_order_wait(self, batch: BatchExecute):
+        """
+        阶段3: 第一边等待成交
+        - 轮询订单状态
+        - 成交后记录成交价，进入下一阶段
+        """
+        session = get_session()
+        
+        if not batch.first_side_order_id:
+            return
+        
+        order_status = await self.trader.get_order_status(
+            batch.position.contract,
+            int(batch.first_side_order_id)
+        )
+        
+        if order_status.get('status') == 'FILLED':
+            batch.first_side_filled_price = float(
+                order_status.get('avgPrice', 
+                batch.contract_price if batch.order_sequence == 'futures_first' else batch.spot_price)
+            )
+            batch.phase = 'FIRST_FILLED'
+            batch.updated_at = datetime.utcnow()
+            session.commit()
+    
+    # ===== 阶段4: 第一边已成交 =====
+    async def _phase_first_filled(self, batch: BatchExecute):
+        """
+        阶段4: 第一边已成交
+        - futures_first: 转入理财，然后做现货
+        - spot_first: 直接做空合约
+        """
+        session = get_session()
+        
+        if batch.order_sequence == 'futures_first':
+            batch.phase = 'SPOT_TRANSFER'
+        else:
+            batch.phase = 'SECOND_ORDER_OPEN'
+        
+        batch.updated_at = datetime.utcnow()
+        session.commit()
+    
+    # ===== 阶段5: 现货转入理财 =====
+    async def _phase_spot_transfer(self, batch: BatchExecute):
+        """
+        阶段5: 现货转入理财
+        - 仅 futures_first 路径需要
+        - 转入活期理财，然后做第二边
+        """
+        session = get_session()
+        
+        result = await self.trader.transfer_to_savings(
+            batch.position.contract,
+            batch.batch_value or 1000
+        )
+        
+        if result.success:
+            batch.phase = 'SECOND_ORDER_OPEN'
+            batch.updated_at = datetime.utcnow()
+            session.commit()
+    
+    # ===== 阶段6: 第二边挂单 =====
+    async def _phase_second_order_open(self, batch: BatchExecute):
+        """
+        阶段6: 第二边挂单
+        - futures_first: 买入现货（补现货）
+        - spot_first: 做空合约（补合约）
+        """
+        session = get_session()
+        amount = batch.batch_value or 1000
+        
+        if batch.order_sequence == 'futures_first':
+            result = await self.trader.buy_spot(
+                batch.position.contract,
+                amount,
+                batch.spot_price
+            )
+        else:
+            result = await self.trader.open_futures_short(
+                batch.position.contract,
+                amount,
+                batch.contract_price
+            )
+        
+        if result.success:
+            batch.second_side_order_id = str(result.order_id)
+            batch.phase = 'SECOND_ORDER_WAIT'
+            batch.updated_at = datetime.utcnow()
+            session.commit()
+        else:
+            batch.execute_status = 'COMPLETED'
+            batch.complete_reason = f'ERROR: {result.message}'
+            session.commit()
+    
+    # ===== 阶段7: 第二边等待成交 =====
+    async def _phase_second_order_wait(self, batch: BatchExecute):
+        """
+        阶段7: 第二边等待成交
+        - 轮询订单状态
+        - 成交后记录成交价，标记完成
+        - 检查主记录是否全部完成
+        """
+        session = get_session()
+        
+        if not batch.second_side_order_id:
+            return
+        
+        order_status = await self.trader.get_order_status(
+            batch.position.contract,
+            int(batch.second_side_order_id)
+        )
+        
+        if order_status.get('status') == 'FILLED':
+            batch.second_side_filled_price = float(
+                order_status.get('avgPrice',
+                batch.spot_price if batch.order_sequence == 'futures_first' else batch.contract_price)
+            )
+            batch.execute_status = 'COMPLETED'
+            batch.complete_reason = 'SUCCESS'
+            batch.phase = 'COMPLETED'
+            batch.updated_at = datetime.utcnow()
+            session.commit()
+            
+            # 检查主记录完成状态
+            await self._check_position_complete(batch.position_execute_id)
+    
+    # ===== 检查主记录完成状态 =====
     async def _check_position_complete(self, position_id: int):
-        """检查主记录完成状态"""
+        """检查主记录的所有批次是否都完成"""
         session = get_session()
         
         batches = session.query(BatchExecute).filter(
