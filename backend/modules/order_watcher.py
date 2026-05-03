@@ -14,7 +14,7 @@ from datetime import datetime
 import aiohttp
 import websockets
 
-from ..database import get_session, BatchExecute
+from ..database import get_async_session, get_session, BatchExecute
 
 logger = logging.getLogger(__name__)
 
@@ -462,75 +462,74 @@ class SchedulerOrderWatcher:
         if not batch_id or not current_phase:
             return
         
-        session = get_session()
-        batch = session.query(BatchExecute).filter(
-            BatchExecute.id == batch_id
-        ).first()
-        
-        if not batch:
-            session.close()
-            return
-        
-        # Map status to phase transition
-        if update.status == OrderStatus.FILLED:
-            # Determine next phase and action
-            if current_phase == 'FIRST_ORDER_WAIT':
-                # Update batch with filled price
-                batch.first_side_filled_price = update.avg_price or batch.contract_price
-                batch.phase = 'FIRST_FILLED'
-                batch.updated_at = datetime.utcnow()
-                session.commit()
+        async with get_async_session() as session:
+            from sqlalchemy import select
+            result = await session.execute(
+                select(BatchExecute).where(BatchExecute.id == batch_id)
+            )
+            batch = result.scalar_one_or_none()
+            
+            if not batch:
+                return
+            
+            # Map status to phase transition
+            if update.status == OrderStatus.FILLED:
+                # Determine next phase and action
+                if current_phase == 'FIRST_ORDER_WAIT':
+                    # Update batch with filled price
+                    batch.first_side_filled_price = update.avg_price or batch.contract_price
+                    batch.phase = 'FIRST_FILLED'
+                    batch.updated_at = datetime.utcnow()
+                    await session.commit()
+                    
+                elif current_phase == 'SECOND_ORDER_WAIT':
+                    # Handle second order filled → transfer to savings
+                    await self._handle_second_order_filled(batch, update.avg_price)
                 
-            elif current_phase == 'SECOND_ORDER_WAIT':
-                # Handle second order filled → transfer to savings
-                await self._handle_second_order_filled(batch, update.avg_price)
-            
-            # Unwatch after handling
-            await self.watcher.unwatch(order_id)
-            
-        elif update.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
-            # Handle failure - re-open order
-            if current_phase == 'FIRST_ORDER_WAIT':
-                batch.phase = 'PENDING'  # Will retry
-                batch.updated_at = datetime.utcnow()
-                session.commit()
-            elif current_phase == 'SECOND_ORDER_WAIT':
-                # Go back to first filled
-                batch.phase = 'FIRST_FILLED'
-                batch.updated_at = datetime.utcnow()
-                session.commit()
-            
-            await self.watcher.unwatch(order_id)
-        
-        session.close()
+                # Unwatch after handling
+                await self.watcher.unwatch(order_id)
+                
+            elif update.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
+                # Handle failure - re-open order
+                if current_phase == 'FIRST_ORDER_WAIT':
+                    batch.phase = 'PENDING'  # Will retry
+                    batch.updated_at = datetime.utcnow()
+                    await session.commit()
+                elif current_phase == 'SECOND_ORDER_WAIT':
+                    # Go back to first filled
+                    batch.phase = 'FIRST_FILLED'
+                    batch.updated_at = datetime.utcnow()
+                    await session.commit()
+                
+                await self.watcher.unwatch(order_id)
     
     async def _handle_second_order_filled(self, batch: BatchExecute, filled_price: float = None):
         """Handle second order filled - transfer to savings and complete."""
-        session = get_session()
-        batch = session.query(BatchExecute).filter(
-            BatchExecute.id == batch.id
-        ).first()
-        
-        if not batch:
-            session.close()
-            return
-        
-        # Update filled price
-        if filled_price:
-            batch.second_side_filled_price = filled_price
-        
-        # Transfer to savings
-        transfer_result = await self.scheduler.trader.transfer_to_savings(
-            batch.position.contract,
-            batch.batch_value or 1000
-        )
-        
-        batch.execute_status = 'COMPLETED'
-        batch.complete_reason = 'SUCCESS'
-        batch.phase = 'COMPLETED'
-        batch.updated_at = datetime.utcnow()
-        session.commit()
-        
-        # Check position complete
-        await self.scheduler._check_position_complete(batch.position_execute_id)
-        session.close()
+        async with get_async_session() as session:
+            from sqlalchemy import select
+            result = await session.execute(
+                select(BatchExecute).where(BatchExecute.id == batch.id)
+            )
+            batch = result.scalar_one_or_none()
+            
+            if not batch:
+                return
+            
+            # Update filled price
+            if filled_price:
+                batch.second_side_filled_price = filled_price
+            
+            # Transfer to savings
+            transfer_result = await self.scheduler.trader.transfer_to_savings(
+                batch.position.contract,
+                batch.batch_value or 1000
+            )
+            
+            batch.execute_status = 'COMPLETED'
+            batch.complete_reason = 'SUCCESS'
+            batch.phase = 'COMPLETED'
+            batch.updated_at = datetime.utcnow()
+            await session.commit()
+            
+            # Check position complete
+            await self.scheduler._check_position_complete(batch.position_execute_id)

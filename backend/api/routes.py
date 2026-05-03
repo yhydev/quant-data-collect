@@ -6,9 +6,10 @@ from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 
-from .database import get_session, PositionExecute, BatchExecute, LockInfo
-from .modules import create_collector, create_trader, PortfolioManager, LockManager
-from .plugins.order_sequence import get_available_plugins, get_plugin
+from ..database import get_session, PositionExecute, BatchExecute, LockInfo
+from ..database import init_db
+from ..modules import create_collector, create_trader, PortfolioManager, LockManager
+from ..plugins.order_sequence import get_available_plugins, get_plugin
 
 
 router = APIRouter()
@@ -154,6 +155,9 @@ async def open_position(request: OpenPositionRequest):
         
         session.commit()
         
+        # Release lock after success
+        await lock_mgr.release(request.contract)
+        
         return StatusResponse(
             status='success',
             message=f"Position opened: {pos.id}, batches: {request.batch_num}"
@@ -285,6 +289,9 @@ async def close_position(request: ClosePositionRequest):
             session.add(batch)
         
         session.commit()
+        
+        # Release lock after success
+        await lock_mgr.release(pos.contract)
         
         return StatusResponse(
             status='success',

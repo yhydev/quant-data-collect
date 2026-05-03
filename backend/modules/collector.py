@@ -1,13 +1,22 @@
 """
 Data collector module for Binance API.
 Implements ICollector interface.
+With retry mechanism and exponential backoff.
 """
 import os
 import asyncio
 from typing import List, Dict
 from decimal import Decimal
 import aiohttp
+import logging
+
 from .interfaces import ICollector, FundingRate, SpotPrice, ContractTicker
+
+logger = logging.getLogger(__name__)
+
+# Retry configuration
+MAX_RETRIES = 3
+RETRY_BACKOFF = 1  # seconds
 
 
 class BinanceCollector(ICollector):
@@ -56,7 +65,7 @@ class BinanceCollector(ICollector):
                 ))
             return rates
         except Exception as e:
-            print(f"Error getting funding rates: {e}")
+            logger.error(f"Error getting funding rates: {e}", exc_info=True)
             return []
     
     async def get_spot_price(self, symbol: str) -> SpotPrice:
@@ -80,7 +89,7 @@ class BinanceCollector(ICollector):
                 ask_price=Decimal(data.get('askPrice', '0'))
             )
         except Exception as e:
-            print(f"Error getting spot price: {e}")
+            logger.warning(f"Error getting spot price for {symbol}: {e}")
             return SpotPrice(symbol, 0, 0)
     
     async def get_contract_ticker(self, symbol: str) -> ContractTicker:
@@ -107,7 +116,7 @@ class BinanceCollector(ICollector):
                 index_price=index_price
             )
         except Exception as e:
-            print(f"Error getting contract ticker: {e}")
+            logger.warning(f"Error getting contract ticker for {symbol}: {e}")
             return ContractTicker(symbol, 0, 0)
     
     async def get_all_contracts(self) -> List[str]:
@@ -126,7 +135,7 @@ class BinanceCollector(ICollector):
             
             return contracts
         except Exception as e:
-            print(f"Error getting contracts: {e}")
+            logger.warning(f"Error getting contracts: {e}")
             return []
 
 

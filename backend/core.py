@@ -313,6 +313,42 @@ class PositionScheduler:
             batch.updated_at = datetime.utcnow()
             await session.commit()
     
+    # ===== 阶段5: 第二边挂单 =====
+    async def _phase_second_order_open(self, batch: BatchExecute):
+        """
+        阶段5: 第二边挂单 (与第一边相反)
+        - futures_first: 买入现货 (buy_spot)
+        - spot_first: 做空合约 (open_futures_short)
+        - 保存订单ID，进入等待阶段
+        """
+        async with get_async_session() as session:
+            amount = batch.batch_value or 1000
+            
+            if batch.order_sequence == 'futures_first':
+                # 第二边: 买入现货
+                result = await self.trader.buy_spot(
+                    batch.position.contract,
+                    amount,
+                    batch.spot_price
+                )
+            else:
+                # 第二边: 做空合约
+                result = await self.trader.open_futures_short(
+                    batch.position.contract,
+                    amount,
+                    batch.contract_price
+                )
+            
+            if result.success:
+                batch.second_side_order_id = str(result.order_id)
+                batch.phase = 'SECOND_ORDER_WAIT'
+                batch.updated_at = datetime.utcnow()
+                await session.commit()
+            else:
+                batch.execute_status = 'COMPLETED'
+                batch.complete_reason = f'ERROR: {result.message}'
+                await session.commit()
+    
     # ===== 阶段6: 第二边等待成交 (使用WebSocket+轮询) =====
     async def _phase_second_order_wait(self, batch: BatchExecute):
         """
@@ -396,17 +432,112 @@ class PositionScheduler:
                     await self.lock_manager.release(pos.contract)
 
 
-# ===== 平仓调度器 (预留) =====
+# ===== 平仓调度器 =====
 class CloseScheduler:
-    """平仓调度器（预留）"""
+    """平仓调度器 - 关闭持仓"""
     
-    def __init__(self):
+    def __init__(self, collector_type: str = 'binance', trader_type: str = 'binance'):
+        self.collector = create_collector(collector_type)
+        self.trader = create_trader(trader_type)
         self.scheduler = AsyncIOScheduler()
     
     def start(self):
-        self.scheduler.add_job(self._wake_pending_closes, IntervalTrigger(seconds=1), id='wake_pending_closes')
-        self.scheduler.add_job(self._execute_closes, IntervalTrigger(seconds=1), id='execute_closes')
+        """Start close scheduler."""
+        # Job 1: 唤醒待平仓
+        self.scheduler.add_job(
+            self._wake_pending_closes,
+            trigger=IntervalTrigger(seconds=1),
+            id='wake_pending_closes',
+            replace_existing=True
+        )
+        # Job 2: 执行平仓
+        self.scheduler.add_job(
+            self._execute_closes,
+            trigger=IntervalTrigger(seconds=1),
+            id='execute_closes',
+            replace_existing=True
+        )
         self.scheduler.start()
+        print("CloseScheduler started")
     
-    def stop(self):
+    async def stop(self):
+        """Stop close scheduler."""
         self.scheduler.shutdown()
+        print("CloseScheduler stopped")
+    
+    # ===== Job 1: 唤醒待平仓 =====
+    async def _wake_pending_closes(self):
+        """唤醒待平仓批次"""
+        async with get_async_session() as session:
+            from sqlalchemy import select
+            result = await session.execute(
+                select(BatchExecute).where(
+                    BatchExecute.execute_status == 'PENDING',
+                    BatchExecute.offset == 'CLOSE'
+                ).order_by(BatchExecute.id)
+            )
+            pending = list(result.scalars().all())
+            
+            woken = 0
+            for batch in pending:
+                batch.execute_status = 'RUNNING'
+                batch.updated_at = datetime.utcnow()
+                await session.commit()
+                woken += 1
+            
+            if woken > 0:
+                print(f"Woke {woken} pending close batches")
+    
+    # ===== Job 2: 执行平仓 =====
+    async def _execute_closes(self):
+        """执行平仓"""
+        async with get_async_session() as session:
+            from sqlalchemy import select
+            result = await session.execute(
+                select(BatchExecute).where(
+                    BatchExecute.execute_status == 'RUNNING',
+                    BatchExecute.offset == 'CLOSE'
+                ).order_by(BatchExecute.id)
+            )
+            running = list(result.scalars().all())
+            
+            for batch in running:
+                try:
+                    # 检查超时
+                    elapsed = (datetime.utcnow() - batch.updated_at).total_seconds()
+                    if elapsed > batch.timeout:
+                        batch.execute_status = 'COMPLETED'
+                        batch.complete_reason = 'TIMEOUT'
+                        await session.commit()
+                        continue
+                    
+                    # 执行平仓逻辑
+                    await self._execute_close(batch)
+                    
+                except Exception as e:
+                    print(f"Error closing batch {batch.id}: {e}")
+                    batch.execute_status = 'COMPLETED'
+                    batch.complete_reason = f'ERROR: {str(e)}'
+                    await session.commit()
+    
+    async def _execute_close(self, batch: BatchExecute):
+        """执行单笔平仓"""
+        contract = batch.position.contract
+        batch_value = batch.batch_value or 1000
+        
+        async with get_async_session() as session:
+            result = await self.trader.close_futures_position(
+                contract,
+                batch_value
+            )
+            
+            if result.success:
+                batch.phase = 'CLOSED'
+                batch.execute_status = 'COMPLETED'
+                batch.complete_reason = 'SUCCESS'
+                batch.updated_at = datetime.utcnow()
+                await session.commit()
+            else:
+                batch.execute_status = 'COMPLETED'
+                batch.complete_reason = f'ERROR: {result.message}'
+                await session.commit()
