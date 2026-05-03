@@ -1,13 +1,16 @@
 """
 Core scheduler for position execution using APScheduler.
 Each phase is extracted into independent methods for testability.
+Now with hybrid approach: WebSocket + Polling fallback for order status.
 """
+import asyncio
 from datetime import datetime
 from decimal import Decimal
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from .modules import create_collector, create_trader, PortfolioManager, LockManager
+from .modules.order_watcher import OrderWatcher, SchedulerOrderWatcher, OrderStatus as OWStatus
 from .plugins.order_sequence import get_plugin
 from .database import get_session, BatchExecute, PositionExecute
 
@@ -18,7 +21,10 @@ DEFAULT_ORDER_TIMEOUT = 300  # 5 minutes
 
 
 class PositionScheduler:
-    """Scheduler for position execution using APScheduler."""
+    """Scheduler for position execution using APScheduler.
+    
+    Hybrid approach: WebSocket + Polling fallback for order status monitoring.
+    """
     
     def __init__(self, collector_type: str = 'binance', 
                  trader_type: str = 'binance',
@@ -29,9 +35,15 @@ class PositionScheduler:
         self.lock_manager = LockManager()
         self.order_plugin = get_plugin(order_plugin)
         self.scheduler = AsyncIOScheduler()
+        
+        # Order watcher with WebSocket + Polling fallback
+        self.order_watcher = SchedulerOrderWatcher(self)
     
     def start(self):
         """Start scheduler with APScheduler."""
+        # Start order watcher first
+        asyncio.create_task(self.order_watcher.start())
+        
         # Job 1: 唤醒pending批次
         self.scheduler.add_job(
             self._wake_pending_batches,
@@ -49,12 +61,47 @@ class PositionScheduler:
         )
         
         self.scheduler.start()
-        print("APScheduler started with 2 jobs")
+        print("APScheduler started with 2 jobs + OrderWatcher")
     
-    def stop(self):
-        """Stop scheduler."""
+    async def stop(self):
+        """Stop scheduler gracefully."""
+        # Stop order watcher first
+        await self.order_watcher.stop()
+        
+        # Shutdown scheduler
         self.scheduler.shutdown()
         print("APScheduler stopped")
+    
+    async def trigger_phase(self, batch_id: int, phase: str, filled_price: float = None):
+        """
+        Trigger phase transition from order watcher callback.
+        
+        Args:
+            batch_id: Batch ID
+            phase: Target phase
+            filled_price: Filled price (if any)
+        """
+        session = get_session()
+        batch = session.query(BatchExecute).filter(
+            BatchExecute.id == batch_id
+        ).first()
+        
+        if not batch:
+            return
+        
+        if phase == 'FIRST_FILLED':
+            batch.first_side_filled_price = filled_price or batch.contract_price
+            batch.phase = 'FIRST_FILLED'
+            batch.updated_at = datetime.utcnow()
+            session.commit()
+        elif phase == 'COMPLETED':
+            batch.execute_status = 'COMPLETED'
+            batch.complete_reason = 'SUCCESS'
+            batch.phase = 'COMPLETED'
+            batch.updated_at = datetime.utcnow()
+            session.commit()
+        
+        session.close()
     
     # ===== Job 1: 唤醒pending批次 =====
     async def _wake_pending_batches(self):
@@ -229,31 +276,34 @@ class PositionScheduler:
             batch.complete_reason = f'ERROR: {result.message}'
             session.commit()
     
-    # ===== 阶段3: 第一边等待成交 =====
+    # ===== 阶段3: 第一边等待成交 (使用WebSocket+轮询) =====
     async def _phase_first_order_wait(self, batch: BatchExecute):
         """
         阶段3: 第一边等待成交
-        - 轮询订单状态
-        - 成交后记录成交价，进入下一阶段
+        - 使用 OrderWatcher 监控订单状态
+        - WebSocket 优先，失败时用轮询
+        - 成交后进入下一阶段
         """
         session = get_session()
         
         if not batch.first_side_order_id:
             return
         
-        order_status = await self.trader.get_order_status(
-            batch.position.contract,
-            int(batch.first_side_order_id)
+        order_id = batch.first_side_order_id
+        contract = batch.position.contract
+        timeout = batch.timeout
+        
+        # 注册到 OrderWatcher 进行监控
+        await self.order_watcher.watch_order(
+            batch_id=batch.id,
+            order_id=order_id,
+            symbol=contract,
+            phase='FIRST_ORDER_WAIT',
+            timeout=timeout
         )
         
-        if order_status.get('status') == 'FILLED':
-            batch.first_side_filled_price = float(
-                order_status.get('avgPrice', 
-                batch.contract_price if batch.order_sequence == 'futures_first' else batch.spot_price)
-            )
-            batch.phase = 'FIRST_FILLED'
-            batch.updated_at = datetime.utcnow()
-            session.commit()
+        # 注意：不再在这里轮询，由 OrderWatcher 触发 phase 转换
+        session.close()
     
     # ===== 阶段4: 第一边已成交 =====
     async def _phase_first_filled(self, batch: BatchExecute):
@@ -268,45 +318,62 @@ class PositionScheduler:
         batch.updated_at = datetime.utcnow()
         session.commit()
     
-    # ===== 阶段5: 现货转入理财 =====
+    # ===== 阶段6: 第二边等待成交 (使用WebSocket+轮询) =====
     async def _phase_second_order_wait(self, batch: BatchExecute):
         """
-        阶段7: 第二边等待成交
-        - 轮询订单状态
-        - 成交后记录成交价
-        - 无论哪个顺序，都需要现货转理财
-        - 然后标记完成
+        阶段6: 第二边等待成交
+        - 使用 OrderWatcher 监控订单状态
+        - WebSocket 优先，失败时用轮询
+        - 成交后转入理财并标记完成
         """
         session = get_session()
         
         if not batch.second_side_order_id:
             return
         
-        order_status = await self.trader.get_order_status(
-            batch.position.contract,
-            int(batch.second_side_order_id)
+        order_id = batch.second_side_order_id
+        contract = batch.position.contract
+        timeout = batch.timeout
+        
+        # 注册到 OrderWatcher 进行监控
+        await self.order_watcher.watch_order(
+            batch_id=batch.id,
+            order_id=order_id,
+            symbol=contract,
+            phase='SECOND_ORDER_WAIT',
+            timeout=timeout
         )
         
-        if order_status.get('status') == 'FILLED':
-            batch.second_side_filled_price = float(
-                order_status.get('avgPrice',
-                batch.spot_price if batch.order_sequence == 'futures_first' else batch.contract_price)
-            )
-            
-            # 现货成交后，转入理财（两个顺序都需要）
-            transfer_result = await self.trader.transfer_to_savings(
-                batch.position.contract,
-                batch.batch_value or 1000
-            )
-            
-            batch.execute_status = 'COMPLETED'
-            batch.complete_reason = 'SUCCESS'
-            batch.phase = 'COMPLETED'
-            batch.updated_at = datetime.utcnow()
-            session.commit()
-            
-            # 检查主记录完成状态
-            await self._check_position_complete(batch.position_execute_id)
+        # 注意：由 OrderWatcher 触发后续处理
+        session.close()
+    
+    # ===== 阶段6处理: 订单成交后的处理 =====
+    async def _handle_second_order_filled(self, batch: BatchExecute, filled_price: float = None):
+        """
+        第二边成交后的处理
+        - 由 OrderWatcher 回调触发
+        - 转入理财并标记完成
+        """
+        session = get_session()
+        
+        # 更新成交价
+        if filled_price:
+            batch.second_side_filled_price = filled_price
+        
+        # 现货成交后，转入理财
+        transfer_result = await self.trader.transfer_to_savings(
+            batch.position.contract,
+            batch.batch_value or 1000
+        )
+        
+        batch.execute_status = 'COMPLETED'
+        batch.complete_reason = 'SUCCESS'
+        batch.phase = 'COMPLETED'
+        batch.updated_at = datetime.utcnow()
+        session.commit()
+        
+        # 检查主记录完成状态
+        await self._check_position_complete(batch.position_execute_id)
     
     # ===== 检查主记录完成状态 =====
     async def _check_position_complete(self, position_id: int):
