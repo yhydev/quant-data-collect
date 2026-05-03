@@ -1,0 +1,182 @@
+"""
+Data collector module for Binance API.
+Implements ICollector interface.
+"""
+import os
+import asyncio
+from typing import List, Dict
+from decimal import Decimal
+import aiohttp
+from .interfaces import ICollector, FundingRate, SpotPrice, ContractTicker
+
+
+class BinanceCollector(ICollector):
+    """Binance data collector."""
+    
+    def __init__(self, api_key: str = None, api_secret: str = None,
+                 testnet: bool = False):
+        self.api_key = api_key or os.getenv('BINANCE_API_KEY', '')
+        self.api_secret = api_secret or os.getenv('BINANCE_SECRET_KEY', '')
+        
+        if testnet:
+            self.base_url = "https://testnet.binance.vision/api"
+            self.futures_url = "https://testnet.binance.vision/api"
+        else:
+            self.base_url = "https://api.binance.com/api"
+            self.futures_url = "https://fapi.binance.com/fapi"
+        
+        self.session = None
+    
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create aiohttp session."""
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession()
+        return self.session
+    
+    async def close(self):
+        """Close session."""
+        if self.session and not self.session.closed:
+            await self.session.close()
+    
+    async def get_funding_rates(self) -> List[FundingRate]:
+        """Get current funding rates for all contracts."""
+        try:
+            session = await self._get_session()
+            async with session.get(f"{self.futures_url}/v1/premiumIndex") as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+            
+            rates = []
+            for item in data:
+                rates.append(FundingRate(
+                    symbol=item.get('symbol', ''),
+                    rate=Decimal(item.get('lastFundingRate', '0')),
+                    next_funding_time=int(item.get('nextFundingTime', 0) / 1000)
+                ))
+            return rates
+        except Exception as e:
+            print(f"Error getting funding rates: {e}")
+            return []
+    
+    async def get_spot_price(self, symbol: str) -> SpotPrice:
+        """Get spot price for a symbol."""
+        try:
+            session = await self._get_session()
+            # Convert BTCUSDT to BTC/USDT for ticker
+            pair = f"{symbol.replace('USDT', '')}/USDT"
+            
+            async with session.get(
+                f"{self.base_url}/v3/ticker/bookTicker",
+                params={'symbol': symbol}
+            ) as resp:
+                if resp.status != 200:
+                    return SpotPrice(symbol, 0, 0)
+                data = await resp.json()
+            
+            return SpotPrice(
+                symbol=symbol,
+                bid_price=Decimal(data.get('bidPrice', '0')),
+                ask_price=Decimal(data.get('askPrice', '0'))
+            )
+        except Exception as e:
+            print(f"Error getting spot price: {e}")
+            return SpotPrice(symbol, 0, 0)
+    
+    async def get_contract_ticker(self, symbol: str) -> ContractTicker:
+        """Get contract ticker (mark price, index price)."""
+        try:
+            session = await self._get_session()
+            
+            async with session.get(
+                f"{self.futures_url}/v1/ticker/price",
+                params={'symbol': symbol}
+            ) as resp:
+                if resp.status != 200:
+                    return ContractTicker(symbol, 0, 0)
+                data = await resp.json()
+            
+            mark_price = Decimal(data.get('price', '0'))
+            
+            # Get index price (mark price is close to index price in normal conditions)
+            index_price = mark_price
+            
+            return ContractTicker(
+                symbol=symbol,
+                mark_price=mark_price,
+                index_price=index_price
+            )
+        except Exception as e:
+            print(f"Error getting contract ticker: {e}")
+            return ContractTicker(symbol, 0, 0)
+    
+    async def get_all_contracts(self) -> List[str]:
+        """Get all available USDT contracts."""
+        try:
+            session = await self._get_session()
+            async with session.get(f"{self.futures_url}/v1/exchangeInfo") as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+            
+            contracts = []
+            for symbol in data.get('symbols', []):
+                if symbol.get('quoteAsset') == 'USDT' and symbol.get('status') == 'TRADING':
+                    contracts.append(symbol.get('symbol'))
+            
+            return contracts
+        except Exception as e:
+            print(f"Error getting contracts: {e}")
+            return []
+
+
+# Mock collector for testing without API
+class MockCollector(ICollector):
+    """Mock collector for testing."""
+    
+    def __init__(self):
+        self.funding_rates = {
+            'BTCUSDT': Decimal('0.0001'),
+            'ETHUSDT': Decimal('0.0001'),
+            'BNBUSDT': Decimal('0.0005'),
+        }
+    
+    async def get_funding_rates(self) -> List[FundingRate]:
+        import time
+        rates = []
+        for symbol, rate in self.funding_rates.items():
+            rates.append(FundingRate(
+                symbol=symbol,
+                rate=rate,
+                next_funding_time=int(time.time()) + 28800
+            ))
+        return rates
+    
+    async def get_spot_price(self, symbol: str) -> SpotPrice:
+        prices = {
+            'BTCUSDT': ('45000.00', '45100.00'),
+            'ETHUSDT': ('2500.00', '2510.00'),
+            'BNBUSDT': ('300.00', '301.00'),
+        }
+        bid, ask = prices.get(symbol, ('0', '0'))
+        return SpotPrice(symbol, Decimal(bid), Decimal(ask))
+    
+    async def get_contract_ticker(self, symbol: str) -> ContractTicker:
+        prices = {
+            'BTCUSDT': ('45000.00', '44950.00'),
+            'ETHUSDT': ('2500.00', '2495.00'),
+            'BNBUSDT': ('300.00', '299.50'),
+        }
+        mark, index = prices.get(symbol, ('0', '0'))
+        return ContractTicker(symbol, Decimal(mark), Decimal(index))
+
+
+# Factory function
+def create_collector(collector_type: str = 'binance', **kwargs) -> ICollector:
+    """Create collector instance."""
+    if collector_type == 'binance':
+        return BinanceCollector(**kwargs)
+    elif collector_type == 'mock':
+        return MockCollector()
+    else:
+        raise ValueError(f"Unknown collector type: {collector_type}")
