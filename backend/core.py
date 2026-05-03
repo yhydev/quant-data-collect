@@ -87,6 +87,7 @@ class PositionScheduler:
             
             # 唤醒批次
             batch.execute_status = 'RUNNING'
+            batch.phase = 'PENDING'  # 设置初始阶段
             batch.updated_at = datetime.utcnow()
             session.commit()
             
