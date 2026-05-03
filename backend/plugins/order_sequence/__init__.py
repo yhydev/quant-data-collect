@@ -2,7 +2,7 @@
 Order sequence plugins.
 Plug-in system to choose execution order.
 """
-from ..interfaces import IOrderPlugin, OrderSequence
+from backend.interfaces import IOrderPlugin, OrderSequence
 
 
 class FuturesFirstPlugin(IOrderPlugin):

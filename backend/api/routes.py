@@ -1,21 +1,25 @@
 """
 API routes for Binance Arbitrage Platform.
 """
+from datetime import datetime
+from typing import List
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
-from datetime import datetime
 
-from ..database import get_session, PositionExecute, BatchExecute, LockInfo
-from ..database import init_db
+from ..database import get_async_session, PositionExecute, BatchExecute, Earning
+from ..database import init_db_async
 from ..modules import create_collector, create_trader, PortfolioManager, LockManager
 from ..plugins.order_sequence import get_available_plugins, get_plugin
 
 
 router = APIRouter()
 
+# Lock manager instance
+_lock_manager = LockManager()
 
-# Request/Response models
+
+# Request/Response models (Pydantic v2 syntax)
 class OpenPositionRequest(BaseModel):
     """Open position request."""
     contract: str
@@ -48,7 +52,7 @@ class PositionResponse(BaseModel):
     offset: str
     created_at: datetime
     updated_at: datetime
-    complete_reason: Optional[str]
+    complete_reason: str | None
 
 
 class BatchResponse(BaseModel):
@@ -58,15 +62,15 @@ class BatchResponse(BaseModel):
     timeout: int
     execute_status: str
     offset: str
-    order_sequence: Optional[str]
-    contract_price: Optional[float]
-    spot_price: Optional[float]
-    phase: Optional[str]
-    first_side_order_id: Optional[str]
-    first_side_filled_price: Optional[float]
-    second_side_order_id: Optional[str]
-    second_side_filled_price: Optional[float]
-    complete_reason: Optional[str]
+    order_sequence: str | None
+    contract_price: float | None
+    spot_price: float | None
+    phase: str | None
+    first_side_order_id: str | None
+    first_side_filled_price: float | None
+    second_side_order_id: str | None
+    second_side_filled_price: float | None
+    complete_reason: str | None
 
 
 class PluginResponse(BaseModel):
@@ -82,10 +86,11 @@ class StatusResponse(BaseModel):
     message: str
 
 
-# Helper functions
-async def get_lock_manager():
-    """Get lock manager instance."""
-    return LockManager()
+class HealthResponse(BaseModel):
+    """Health check response."""
+    status: str
+    database: str = "unknown"
+    scheduler: str = "unknown"
 
 
 # Routes
@@ -111,18 +116,16 @@ async def get_funding_rates():
 @router.post("/open-position", response_model=StatusResponse)
 async def open_position(request: OpenPositionRequest):
     """Submit open position request."""
-    session = get_session()
-    lock_mgr = await get_lock_manager()
-    
     # Check if already locked
-    if lock_mgr.is_locked(request.contract):
+    is_locked = await _lock_manager.is_locked(request.contract)
+    if is_locked:
         raise HTTPException(
             status_code=400,
             detail=f"Contract {request.contract} is locked by another operation"
         )
     
     # Acquire lock
-    acquired = await lock_mgr.acquire(request.contract, 'OPEN')
+    acquired = await _lock_manager.acquire(request.contract, 'OPEN')
     if not acquired:
         raise HTTPException(
             status_code=400,
@@ -130,33 +133,31 @@ async def open_position(request: OpenPositionRequest):
         )
     
     try:
-        # Create position execute record
-        pos = PositionExecute(
-            contract=request.contract,
-            batch_num=request.batch_num,
-            batch_position_value=request.batch_position_value,
-            offset='OPEN',
-            execute_status='PENDING'
-        )
-        session.add(pos)
-        session.commit()
-        session.refresh(pos)
-        
-        # Create batch execute records
-        for i in range(request.batch_num):
-            batch = BatchExecute(
-                position_execute_id=pos.id,
-                timeout=300,
+        async with get_async_session() as session:
+            pos = PositionExecute(
+                contract=request.contract,
+                batch_num=request.batch_num,
+                batch_position_value=request.batch_position_value,
                 offset='OPEN',
-                execute_status='PENDING',
-                phase='PENDING'
+                execute_status='PENDING'
             )
-            session.add(batch)
+            session.add(pos)
+            await session.commit()
+            await session.refresh(pos)
+            
+            for i in range(request.batch_num):
+                batch = BatchExecute(
+                    position_execute_id=pos.id,
+                    timeout=300,
+                    offset='OPEN',
+                    execute_status='PENDING',
+                    phase='PENDING'
+                )
+                session.add(batch)
+            
+            await session.commit()
         
-        session.commit()
-        
-        # Release lock after success
-        await lock_mgr.release(request.contract)
+        await _lock_manager.release(request.contract)
         
         return StatusResponse(
             status='success',
@@ -164,100 +165,106 @@ async def open_position(request: OpenPositionRequest):
         )
     
     except Exception as e:
-        await lock_mgr.release(request.contract)
+        await _lock_manager.release(request.contract)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/open-progress/{position_id}")
 async def get_open_progress(position_id: int):
     """Get open position progress."""
-    session = get_session()
-    
-    pos = session.query(PositionExecute).filter(
-        PositionExecute.id == position_id
-    ).first()
-    
-    if not pos:
-        raise HTTPException(status_code=404, detail="Position not found")
-    
-    batches = session.query(BatchExecute).filter(
-        BatchExecute.position_execute_id == position_id
-    ).all()
-    
-    return {
-        'id': pos.id,
-        'contract': pos.contract,
-        'execute_status': pos.execute_status,
-        'complete_reason': pos.complete_reason,
-        'batches': [
-            {
-                'id': b.id,
-                'status': b.execute_status,
-                'phase': b.phase,
-                'contract_price': b.contract_price,
-                'spot_price': b.spot_price,
-                'first_side_order_id': b.first_side_order_id,
-                'first_side_filled_price': b.first_side_filled_price,
-                'second_side_order_id': b.second_side_order_id,
-                'second_side_filled_price': b.second_side_filled_price,
-                'complete_reason': b.complete_reason
-            }
-            for b in batches
-        ]
-    }
+    async with get_async_session() as session:
+        from sqlalchemy import select
+        
+        result = await session.execute(
+            select(PositionExecute).where(PositionExecute.id == position_id)
+        )
+        pos = result.scalar_one_or_none()
+        
+        if not pos:
+            raise HTTPException(status_code=404, detail="Position not found")
+        
+        result = await session.execute(
+            select(BatchExecute).where(BatchExecute.position_execute_id == position_id)
+        )
+        batches = list(result.scalars().all())
+        
+        return {
+            'id': pos.id,
+            'contract': pos.contract,
+            'execute_status': pos.execute_status,
+            'complete_reason': pos.complete_reason,
+            'batches': [
+                {
+                    'id': b.id,
+                    'status': b.execute_status,
+                    'phase': b.phase,
+                    'contract_price': b.contract_price,
+                    'spot_price': b.spot_price,
+                    'first_side_order_id': b.first_side_order_id,
+                    'first_side_filled_price': b.first_side_filled_price,
+                    'second_side_order_id': b.second_side_order_id,
+                    'second_side_filled_price': b.second_side_filled_price,
+                    'complete_reason': b.complete_reason
+                }
+                for b in batches
+            ]
+        }
 
 
 @router.get("/batch-detail/{batch_id}")
 async def get_batch_detail(batch_id: int):
     """Get batch detail."""
-    session = get_session()
-    
-    batch = session.query(BatchExecute).filter(
-        BatchExecute.id == batch_id
-    ).first()
-    
-    if not batch:
-        raise HTTPException(status_code=404, detail="Batch not found")
-    
-    return {
-        'id': batch.id,
-        'position_execute_id': batch.position_execute_id,
-        'execute_status': batch.execute_status,
-        'phase': batch.phase,
-        'order_sequence': batch.order_sequence,
-        'contract_price': batch.contract_price,
-        'spot_price': batch.spot_price,
-        'first_side_order_id': batch.first_side_order_id,
-        'first_side_filled_price': batch.first_side_filled_price,
-        'second_side_order_id': batch.second_side_order_id,
-        'second_side_filled_price': batch.second_side_filled_price,
-        'complete_reason': batch.complete_reason
-    }
+    async with get_async_session() as session:
+        from sqlalchemy import select
+        
+        result = await session.execute(
+            select(BatchExecute).where(BatchExecute.id == batch_id)
+        )
+        batch = result.scalar_one_or_none()
+        
+        if not batch:
+            raise HTTPException(status_code=404, detail="Batch not found")
+        
+        return {
+            'id': batch.id,
+            'position_execute_id': batch.position_execute_id,
+            'execute_status': batch.execute_status,
+            'phase': batch.phase,
+            'order_sequence': batch.order_sequence,
+            'contract_price': batch.contract_price,
+            'spot_price': batch.spot_price,
+            'first_side_order_id': batch.first_side_order_id,
+            'first_side_filled_price': batch.first_side_filled_price,
+            'second_side_order_id': batch.second_side_order_id,
+            'second_side_filled_price': batch.second_side_filled_price,
+            'complete_reason': batch.complete_reason
+        }
 
 
 @router.post("/close-position", response_model=StatusResponse)
 async def close_position(request: ClosePositionRequest):
     """Submit close position request."""
-    session = get_session()
-    lock_mgr = await get_lock_manager()
-    
-    # Get original position
-    pos = session.query(PositionExecute).filter(
-        PositionExecute.id == request.position_id
-    ).first()
+    async with get_async_session() as session:
+        from sqlalchemy import select
+        
+        result = await session.execute(
+            select(PositionExecute).where(PositionExecute.id == request.position_id)
+        )
+        pos = result.scalar_one_or_none()
     
     if not pos:
         raise HTTPException(status_code=404, detail="Position not found")
     
     # Check if already locked
-    if lock_mgr.is_locked(pos.contract):
+    is_locked = await _lock_manager.is_locked(pos.contract)
+    if is_locked:
         raise HTTPException(
             status_code=400,
             detail=f"Contract {pos.contract} is locked by another operation"
         )
     
     # Acquire lock
-    acquired = await lock_mgr.acquire(pos.contract, 'CLOSE')
+    acquired = await _lock_manager.acquire(pos.contract, 'CLOSE')
     if not acquired:
         raise HTTPException(
             status_code=400,
@@ -265,33 +272,31 @@ async def close_position(request: ClosePositionRequest):
         )
     
     try:
-        # Create close position execute
-        close_pos = PositionExecute(
-            contract=pos.contract,
-            batch_num=request.batch_num,
-            batch_position_value=request.batch_position_value,
-            offset='CLOSE',
-            execute_status='PENDING'
-        )
-        session.add(close_pos)
-        session.commit()
-        session.refresh(close_pos)
-        
-        # Create batch records
-        for i in range(request.batch_num):
-            batch = BatchExecute(
-                position_execute_id=close_pos.id,
-                timeout=300,
+        async with get_async_session() as session:
+            close_pos = PositionExecute(
+                contract=pos.contract,
+                batch_num=request.batch_num,
+                batch_position_value=request.batch_position_value,
                 offset='CLOSE',
-                execute_status='PENDING',
-                phase='PENDING'
+                execute_status='PENDING'
             )
-            session.add(batch)
+            session.add(close_pos)
+            await session.commit()
+            await session.refresh(close_pos)
+            
+            for i in range(request.batch_num):
+                batch = BatchExecute(
+                    position_execute_id=close_pos.id,
+                    timeout=300,
+                    offset='CLOSE',
+                    execute_status='PENDING',
+                    phase='PENDING'
+                )
+                session.add(batch)
+            
+            await session.commit()
         
-        session.commit()
-        
-        # Release lock after success
-        await lock_mgr.release(pos.contract)
+        await _lock_manager.release(pos.contract)
         
         return StatusResponse(
             status='success',
@@ -299,42 +304,47 @@ async def close_position(request: ClosePositionRequest):
         )
     
     except Exception as e:
-        await lock_mgr.release(pos.contract)
+        await _lock_manager.release(pos.contract)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/positions")
 async def get_positions():
     """Get all positions."""
-    session = get_session()
-    
-    positions = session.query(PositionExecute).filter(
-        PositionExecute.offset == 'OPEN'
-    ).filter(
-        PositionExecute.execute_status.in_(['PENDING', 'RUNNING'])
-    ).all()
-    
-    return [
-        {
-            'id': p.id,
-            'contract': p.contract,
-            'batch_num': p.batch_num,
-            'execute_status': p.execute_status,
-            'batch_position_value': p.batch_position_value,
-            'created_at': p.created_at.isoformat()
-        }
-        for p in positions
-    ]
+    async with get_async_session() as session:
+        from sqlalchemy import select
+        
+        result = await session.execute(
+            select(PositionExecute).where(
+                PositionExecute.offset == 'OPEN',
+                PositionExecute.execute_status.in_(['PENDING', 'RUNNING'])
+            )
+        )
+        positions = list(result.scalars().all())
+        
+        return [
+            {
+                'id': p.id,
+                'contract': p.contract,
+                'batch_num': p.batch_num,
+                'execute_status': p.execute_status,
+                'batch_position_value': p.batch_position_value,
+                'created_at': p.created_at.isoformat()
+            }
+            for p in positions
+        ]
 
 
 @router.get("/positions/{position_id}")
 async def get_position(position_id: int):
     """Get position by ID."""
-    session = get_session()
-    
-    pos = session.query(PositionExecute).filter(
-        PositionExecute.id == position_id
-    ).first()
+    async with get_async_session() as session:
+        from sqlalchemy import select
+        
+        result = await session.execute(
+            select(PositionExecute).where(PositionExecute.id == position_id)
+        )
+        pos = result.scalar_one_or_none()
     
     if not pos:
         raise HTTPException(status_code=404, detail="Position not found")
@@ -388,28 +398,50 @@ async def set_plugin(plugin_name: str):
 @router.get("/earnings")
 async def get_earnings():
     """Get earnings history."""
-    from .database import Earning
-    
-    session = get_session()
-    earnings = session.query(Earning).all()
-    
-    return [
-        {
-            'id': e.id,
-            'contract': e.contract,
-            'amount': e.amount,
-            'funding_earn': e.funding_earn,
-            'interest_earn': e.interest_earn,
-            'pnl': e.pnl,
-            'total_earn': e.total_earn,
-            'status': e.status,
-            'created_at': e.created_at.isoformat()
-        }
-        for e in earnings
-    ]
+    async with get_async_session() as session:
+        from sqlalchemy import select
+        
+        result = await session.execute(select(Earning))
+        earnings = list(result.scalars().all())
+        
+        return [
+            {
+                'id': e.id,
+                'contract': e.contract,
+                'amount': e.amount,
+                'funding_earn': e.funding_earn,
+                'interest_earn': e.interest_earn,
+                'pnl': e.pnl,
+                'total_earn': e.total_earn,
+                'status': e.status,
+                'created_at': e.created_at.isoformat()
+            }
+            for e in earnings
+        ]
 
 
-@router.get("/health")
+@router.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check."""
-    return {'status': 'ok'}
+    """Health check with database status."""
+    db_status = "unknown"
+    
+    # Check database
+    try:
+        async with get_async_session() as session:
+            from sqlalchemy import select
+            result = await session.execute(select(1))
+            result.scalar_one()
+        db_status = "healthy"
+    except Exception:
+        db_status = "unhealthy"
+    
+    # Return status (scheduler status is handled by main.py lifespan)
+    scheduler_status = "healthy"  # Assumed healthy if app is running
+    
+    overall = "ok" if db_status == "healthy" else "degraded"
+    
+    return HealthResponse(
+        status=overall,
+        database=db_status,
+        scheduler=scheduler_status
+    )

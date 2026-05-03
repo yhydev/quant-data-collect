@@ -10,7 +10,7 @@ from decimal import Decimal
 import aiohttp
 import logging
 
-from .interfaces import ICollector, FundingRate, SpotPrice, ContractTicker
+from ..interfaces import ICollector, FundingRate, SpotPrice, ContractTicker
 
 logger = logging.getLogger(__name__)
 

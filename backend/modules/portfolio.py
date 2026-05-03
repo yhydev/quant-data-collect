@@ -6,7 +6,7 @@ from typing import List, Optional
 from datetime import datetime
 from sqlalchemy import select
 
-from ..database import get_async_session, PositionExecute, BatchExecute, PositionOrder, 
+from ..database import get_async_session, PositionExecute, BatchExecute, PositionOrder
 from ..database import PositionStep, TradingHistory, FundingRateHistory, Earning
 from ..interfaces import IPortfolio, Position as PositionModel, Earning as EarningModel
 
@@ -320,20 +320,17 @@ class LockManager:
                 lock.released_at = datetime.utcnow()
                 await session.commit()
     
-    def is_locked(self, symbol: str) -> bool:
-        """Check if symbol is locked (sync version for API compatibility)."""
-        # This is a blocking call - run in sync context only
+    async def is_locked(self, symbol: str) -> bool:
+        """Check if symbol is locked (async version)."""
         from ..database import LockInfo
-        from ..database import init_db, get_session as sync_get_session
+        from sqlalchemy import select
         
-        # Ensure DB is initialized
-        init_db()
-        session = sync_get_session()
-        try:
-            lock = session.query(LockInfo).filter(
-                LockInfo.symbol == symbol,
-                LockInfo.locked == True
-            ).first()
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(LockInfo).where(
+                    LockInfo.symbol == symbol,
+                    LockInfo.locked == True
+                )
+            )
+            lock = result.scalar_one_or_none()
             return lock is not None
-        finally:
-            session.close()

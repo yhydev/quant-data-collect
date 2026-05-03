@@ -2,14 +2,13 @@
 Database layer for Binance Arbitrage Platform.
 Uses SQLAlchemy 2.0 AsyncORM for PostgreSQL.
 """
+import os
 from datetime import datetime
 from typing import Optional, List, AsyncGenerator
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Text, select
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
-from sqlalchemy.pool import NullPool
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-import os
 
 Base = declarative_base()
 
@@ -191,9 +190,16 @@ async def init_db_async():
     global _async_engine, _async_session_factory
     
     db_url = get_async_database_url()
+    
+    # Configure connection pool for better performance
+    pool_size = int(os.getenv('DB_POOL_SIZE', '5'))
+    max_overflow = int(os.getenv('DB_MAX_OVERFLOW', '10'))
+    
     _async_engine = create_async_engine(
         db_url,
-        poolclass=NullPool,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_pre_ping=True,  # Verify connections before use
         echo=False
     )
     _async_session_factory = async_sessionmaker(
@@ -220,28 +226,25 @@ async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
-async def get_session() -> AsyncSession:
-    """Get async session (non-generator version for simpler usage)."""
-    global _async_session_factory
-    
-    if _async_session_factory is None:
-        await init_db_async()
-    
-    return _async_session_factory()
-
-
-# Sync version for backward compatibility (deprecated)
-def init_db():
-    """Initialize database connection (sync - deprecated, use init_db_async)."""
-    db_url = get_database_url()
-    engine = create_engine(db_url, poolclass=NullPool)
-    Base.metadata.create_all(engine)
-    return engine
-
+# Synchronous session for backward compatibility
+# Deprecated: Use get_async_session() instead
+import warnings
 
 def get_session():
     """Get database session (sync - deprecated, use get_async_session)."""
-    engine = init_db()
+    warnings.warn(
+        "get_session() is deprecated, use get_async_session() instead",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    # Use synchronous engine for backward compatibility
+    db_url = get_database_url()
+    engine = create_engine(
+        db_url,
+        pool_size=5,
+        max_overflow=10,
+        pool_pre_ping=True
+    )
     Session = sessionmaker(bind=engine)
     return Session()
 

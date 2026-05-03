@@ -10,7 +10,7 @@ from decimal import Decimal
 import aiohttp
 import hashlib
 import hmac
-from .interfaces import ITrader, TradeResult
+from ..interfaces import ITrader, TradeResult
 
 
 class BinanceTrader(ITrader):
@@ -384,6 +384,18 @@ class MockTrader(ITrader):
     
     async def transfer_from_savings(self, symbol: str, amount: float) -> TradeResult:
         return TradeResult(success=True, message="Transferred from savings")
+    
+    async def get_order_status(self, symbol: str, order_id: int) -> dict:
+        """Get order status."""
+        if order_id in self.orders:
+            order = self.orders[order_id]
+            return {
+                'status': order.get('status', 'FILLED'),
+                'symbol': order.get('symbol'),
+                'orderId': order_id,
+                'avgPrice': order.get('price', 0)
+            }
+        return {'status': 'UNKNOWN', 'symbol': symbol}
 
 
 # Factory function
