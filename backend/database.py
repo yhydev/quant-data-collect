@@ -1,13 +1,14 @@
 """
 Database layer for Binance Arbitrage Platform.
-Uses SQLAlchemy ORM for PostgreSQL.
+Uses SQLAlchemy 2.0 AsyncORM for PostgreSQL.
 """
 from datetime import datetime
-from typing import Optional, List
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Text
+from typing import Optional, List, AsyncGenerator
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Text, select
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 import os
 
 Base = declarative_base()
@@ -160,7 +161,7 @@ class LockInfo(Base):
 
 # Database configuration
 def get_database_url() -> str:
-    """Get database URL from environment."""
+    """Get database URL from environment (sync version for compatibility)."""
     host = os.getenv('POSTGRES_HOST', 'localhost')
     port = os.getenv('POSTGRES_PORT', '5432')
     user = os.getenv('POSTGRES_USER', 'postgres')
@@ -169,8 +170,69 @@ def get_database_url() -> str:
     return f"postgresql://{user}:{password}@{host}:{port}/{db}"
 
 
+def get_async_database_url() -> str:
+    """Get async database URL from environment."""
+    host = os.getenv('POSTGRES_HOST', 'localhost')
+    port = os.getenv('POSTGRES_PORT', '5432')
+    user = os.getenv('POSTGRES_USER', 'postgres')
+    password = os.getenv('POSTGRES_PASSWORD', 'postgres')
+    db = os.getenv('POSTGRES_DB', 'arbitrage')
+    # asyncpg requires postgresql+asyncpg://
+    return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{db}"
+
+
+# Async engine and session (main)
+_async_engine = None
+_async_session_factory = None
+
+
+async def init_db_async():
+    """Initialize async database connection."""
+    global _async_engine, _async_session_factory
+    
+    db_url = get_async_database_url()
+    _async_engine = create_async_engine(
+        db_url,
+        poolclass=NullPool,
+        echo=False
+    )
+    _async_session_factory = async_sessionmaker(
+        _async_engine,
+        class_=AsyncSession,
+        expire_on_commit=False
+    )
+    
+    # Create tables
+    async with _async_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    
+    return _async_engine
+
+
+async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
+    """Get async database session (yield per operation)."""
+    global _async_session_factory
+    
+    if _async_session_factory is None:
+        await init_db_async()
+    
+    async with _async_session_factory() as session:
+        yield session
+
+
+async def get_session() -> AsyncSession:
+    """Get async session (non-generator version for simpler usage)."""
+    global _async_session_factory
+    
+    if _async_session_factory is None:
+        await init_db_async()
+    
+    return _async_session_factory()
+
+
+# Sync version for backward compatibility (deprecated)
 def init_db():
-    """Initialize database connection."""
+    """Initialize database connection (sync - deprecated, use init_db_async)."""
     db_url = get_database_url()
     engine = create_engine(db_url, poolclass=NullPool)
     Base.metadata.create_all(engine)
@@ -178,7 +240,7 @@ def init_db():
 
 
 def get_session():
-    """Get database session."""
+    """Get database session (sync - deprecated, use get_async_session)."""
     engine = init_db()
     Session = sessionmaker(bind=engine)
     return Session()
@@ -189,7 +251,7 @@ class DBHelper:
     """Database helper functions."""
     
     @staticmethod
-    def create_position_execute(session, contract: str, batch_num: int,
+    async def create_position_execute(session: AsyncSession, contract: str, batch_num: int,
                               batch_position_value: float, offset: str) -> PositionExecute:
         """Create position execute record."""
         pos = PositionExecute(
@@ -200,12 +262,12 @@ class DBHelper:
             execute_status='PENDING'
         )
         session.add(pos)
-        session.commit()
-        session.refresh(pos)
+        await session.commit()
+        await session.refresh(pos)
         return pos
     
     @staticmethod
-    def create_batch_execute(session, position_execute_id: int,
+    async def create_batch_execute(session: AsyncSession, position_execute_id: int,
                            timeout: int = 300) -> BatchExecute:
         """Create batch execute record."""
         batch = BatchExecute(
@@ -215,65 +277,73 @@ class DBHelper:
             phase='PENDING'
         )
         session.add(batch)
-        session.commit()
-        session.refresh(batch)
+        await session.commit()
+        await session.refresh(batch)
         return batch
     
     @staticmethod
-    def get_pending_batches(session) -> List[BatchExecute]:
+    async def get_pending_batches(session: AsyncSession) -> List[BatchExecute]:
         """Get all pending batches."""
-        return session.query(BatchExecute).filter(
-            BatchExecute.execute_status == 'PENDING'
-        ).all()
+        result = await session.execute(
+            select(BatchExecute).where(BatchExecute.execute_status == 'PENDING')
+        )
+        return list(result.scalars().all())
     
     @staticmethod
-    def get_running_batches(session) -> List[BatchExecute]:
+    async def get_running_batches(session: AsyncSession) -> List[BatchExecute]:
         """Get all running batches."""
-        return session.query(BatchExecute).filter(
-            BatchExecute.execute_status == 'RUNNING'
-        ).all()
+        result = await session.execute(
+            select(BatchExecute).where(BatchExecute.execute_status == 'RUNNING')
+        )
+        return list(result.scalars().all())
     
     @staticmethod
-    def get_position_execute(session, id: int) -> Optional[PositionExecute]:
+    async def get_position_execute(session: AsyncSession, id: int) -> Optional[PositionExecute]:
         """Get position execute by ID."""
-        return session.query(PositionExecute).filter(
-            PositionExecute.id == id
-        ).first()
+        result = await session.execute(
+            select(PositionExecute).where(PositionExecute.id == id)
+        )
+        return result.scalar_one_or_none()
     
     @staticmethod
-    def get_all_positions(session) -> List[PositionExecute]:
+    async def get_all_positions(session: AsyncSession) -> List[PositionExecute]:
         """Get all position executes."""
-        return session.query(PositionExecute).filter(
-            PositionExecute.offset == 'OPEN'
-        ).filter(
-            PositionExecute.execute_status.in_(['PENDING', 'RUNNING'])
-        ).all()
+        result = await session.execute(
+            select(PositionExecute).where(
+                PositionExecute.offset == 'OPEN',
+                PositionExecute.execute_status.in_(['PENDING', 'RUNNING'])
+            )
+        )
+        return list(result.scalars().all())
     
     @staticmethod
-    def is_symbol_locked(session, symbol: str) -> bool:
+    async def is_symbol_locked(session: AsyncSession, symbol: str) -> bool:
         """Check if symbol is locked."""
-        lock = session.query(LockInfo).filter(
-            LockInfo.symbol == symbol,
-            LockInfo.locked == True
-        ).first()
-        return lock is not None
+        result = await session.execute(
+            select(LockInfo).where(
+                LockInfo.symbol == symbol,
+                LockInfo.locked == True
+            )
+        )
+        return result.scalar_one_or_none() is not None
     
     @staticmethod
-    def acquire_lock(session, symbol: str, operation: str) -> bool:
+    async def acquire_lock(session: AsyncSession, symbol: str, operation: str) -> bool:
         """Acquire lock for symbol."""
-        if DBHelper.is_symbol_locked(session, symbol):
+        if await DBHelper.is_symbol_locked(session, symbol):
             return False
         lock = LockInfo(symbol=symbol, operation=operation, locked=True)
         session.add(lock)
-        session.commit()
+        await session.commit()
         return True
     
     @staticmethod
-    def release_lock(session, symbol: str) -> None:
+    async def release_lock(session: AsyncSession, symbol: str) -> None:
         """Release lock for symbol."""
-        lock = session.query(LockInfo).filter(
-            LockInfo.symbol == symbol
-        ).first()
+        result = await session.execute(
+            select(LockInfo).where(LockInfo.symbol == symbol)
+        )
+        lock = result.scalar_one_or_none()
         if lock:
             lock.locked = False
-            session.commit()
+            await session.commit()

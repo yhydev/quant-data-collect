@@ -10,10 +10,11 @@ from typing import Dict, Any, Optional, Callable
 
 from transitions import Machine
 from dataclasses import dataclass, field
+from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
-from ..database import get_session, BatchExecute, PositionExecute
+from ..database import get_async_session, init_db_async, BatchExecute, PositionExecute
 from .order_watcher import SchedulerOrderWatcher
 from . import create_collector, create_trader, PortfolioManager, LockManager
 from ..plugins.order_sequence import get_plugin
@@ -244,31 +245,34 @@ class BatchPhaseMachine:
         if not self._batch:
             return
         
-        session = get_session()
-        batch = session.query(BatchExecute).filter(
-            BatchExecute.id == self._batch.id
-        ).first()
+        async def _do_save():
+            async with get_async_session() as session:
+                result = await session.execute(
+                    select(BatchExecute).where(BatchExecute.id == self._batch.id)
+                )
+                batch = result.scalar_one_or_none()
+                
+                if not batch:
+                    return
+                
+                # Save state
+                batch.phase = self.state
+                
+                # Save context
+                if self._context:
+                    batch.contract_price = self._context.contract_price
+                    batch.spot_price = self._context.spot_price
+                    batch.first_side_order_id = self._context.first_side_order_id
+                    batch.first_side_filled_price = self._context.first_side_filled_price
+                    batch.second_side_order_id = self._context.second_side_order_id
+                    batch.second_side_filled_price = self._context.second_side_filled_price
+                    batch.order_sequence = self._context.order_sequence
+                
+                batch.updated_at = datetime.utcnow()
+                await session.commit()
         
-        if not batch:
-            session.close()
-            return
-        
-        # Save state
-        batch.phase = self.state
-        
-        # Save context
-        if self._context:
-            batch.contract_price = self._context.contract_price
-            batch.spot_price = self._context.spot_price
-            batch.first_side_order_id = self._context.first_side_order_id
-            batch.first_side_filled_price = self._context.first_side_filled_price
-            batch.second_side_order_id = self._context.second_side_order_id
-            batch.second_side_filled_price = self._context.second_side_filled_price
-            batch.order_sequence = self._context.order_sequence
-        
-        batch.updated_at = datetime.utcnow()
-        session.commit()
-        session.close()
+        # Run async save
+        asyncio.get_event_loop().run_until_complete(_do_save())
     
     # ==================== Conditions ====================
     
