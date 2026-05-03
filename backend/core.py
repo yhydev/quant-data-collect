@@ -153,8 +153,6 @@ class PositionScheduler:
             await self._phase_first_order_wait(batch)
         elif phase == 'FIRST_FILLED':
             await self._phase_first_filled(batch)
-        elif phase == 'SPOT_TRANSFER':
-            await self._phase_spot_transfer(batch)
         elif phase == 'SECOND_ORDER_OPEN':
             await self._phase_second_order_open(batch)
         elif phase == 'SECOND_ORDER_WAIT':
@@ -261,78 +259,23 @@ class PositionScheduler:
     async def _phase_first_filled(self, batch: BatchExecute):
         """
         阶段4: 第一边已成交
-        - futures_first: 转入理财，然后做现货
-        - spot_first: 直接做空合约
+        - 无论哪个顺序，都进入第二边挂单
+        - 下一阶段会处理现货转理财
         """
         session = get_session()
         
-        if batch.order_sequence == 'futures_first':
-            batch.phase = 'SPOT_TRANSFER'
-        else:
-            batch.phase = 'SECOND_ORDER_OPEN'
-        
+        batch.phase = 'SECOND_ORDER_OPEN'
         batch.updated_at = datetime.utcnow()
         session.commit()
     
     # ===== 阶段5: 现货转入理财 =====
-    async def _phase_spot_transfer(self, batch: BatchExecute):
-        """
-        阶段5: 现货转入理财
-        - 仅 futures_first 路径需要
-        - 转入活期理财，然后做第二边
-        """
-        session = get_session()
-        
-        result = await self.trader.transfer_to_savings(
-            batch.position.contract,
-            batch.batch_value or 1000
-        )
-        
-        if result.success:
-            batch.phase = 'SECOND_ORDER_OPEN'
-            batch.updated_at = datetime.utcnow()
-            session.commit()
-    
-    # ===== 阶段6: 第二边挂单 =====
-    async def _phase_second_order_open(self, batch: BatchExecute):
-        """
-        阶段6: 第二边挂单
-        - futures_first: 买入现货（补现货）
-        - spot_first: 做空合约（补合约）
-        """
-        session = get_session()
-        amount = batch.batch_value or 1000
-        
-        if batch.order_sequence == 'futures_first':
-            result = await self.trader.buy_spot(
-                batch.position.contract,
-                amount,
-                batch.spot_price
-            )
-        else:
-            result = await self.trader.open_futures_short(
-                batch.position.contract,
-                amount,
-                batch.contract_price
-            )
-        
-        if result.success:
-            batch.second_side_order_id = str(result.order_id)
-            batch.phase = 'SECOND_ORDER_WAIT'
-            batch.updated_at = datetime.utcnow()
-            session.commit()
-        else:
-            batch.execute_status = 'COMPLETED'
-            batch.complete_reason = f'ERROR: {result.message}'
-            session.commit()
-    
-    # ===== 阶段7: 第二边等待成交 =====
     async def _phase_second_order_wait(self, batch: BatchExecute):
         """
         阶段7: 第二边等待成交
         - 轮询订单状态
-        - 成交后记录成交价，标记完成
-        - 检查主记录是否全部完成
+        - 成交后记录成交价
+        - 无论哪个顺序，都需要现货转理财
+        - 然后标记完成
         """
         session = get_session()
         
@@ -349,6 +292,13 @@ class PositionScheduler:
                 order_status.get('avgPrice',
                 batch.spot_price if batch.order_sequence == 'futures_first' else batch.contract_price)
             )
+            
+            # 现货成交后，转入理财（两个顺序都需要）
+            transfer_result = await self.trader.transfer_to_savings(
+                batch.position.contract,
+                batch.batch_value or 1000
+            )
+            
             batch.execute_status = 'COMPLETED'
             batch.complete_reason = 'SUCCESS'
             batch.phase = 'COMPLETED'
