@@ -10,7 +10,11 @@ from typing import AsyncGenerator
 
 from api.routes import router as api_router
 from models.database import init_db_async
+
+# 导入各层组件
 from scheduler.core import WakeScheduler, ExecuteScheduler
+from services.batch_service import BatchExecutionService
+from events.phase_service import PhaseService, PhaseServiceConfig
 
 
 # Configure logging
@@ -27,12 +31,14 @@ def setup_logging():
 # Global scheduler instances
 wake_scheduler: WakeScheduler | None = None
 execute_scheduler: ExecuteScheduler | None = None
+batch_service: BatchExecutionService | None = None
+phase_service: PhaseService | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
-    global wake_scheduler, execute_scheduler
+    global wake_scheduler, execute_scheduler, batch_service, phase_service
     
     # Setup logging
     setup_logging()
@@ -48,15 +54,38 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.warning(f"Database init warning: {e}")
     
-    # Start wake scheduler (统一唤醒)
-    wake_scheduler = WakeScheduler()
-    wake_scheduler.start()
-    logger.info("Wake scheduler started")
+    # ========== 依赖注入：main.py负责组装所有组件 ==========
     
-    # Start execute scheduler (基于状态机路由)
+    # 1. 创建services层
+    batch_service = BatchExecutionService(
+        collector=None,  # 由BatchExecutionService内部创建
+        trader=None,
+        order_plugin=None,
+        order_watcher=None
+    )
+    
+    # 2. 创建events层
+    phase_service = PhaseService(PhaseServiceConfig())
+    
+    # 3. 创建scheduler层（纯触发）
+    wake_scheduler = WakeScheduler()
     execute_scheduler = ExecuteScheduler()
+    
+    # 4. 注入依赖到scheduler（通过callback解耦）
+    # WakeScheduler callback (同步函数）
+    wake_scheduler.set_callback(lambda: batch_service.wake_pending_batches())
+    
+    # ExecuteScheduler callback (异步函数需要包装）
+    async def execute_callback():
+        await batch_service.trigger_all_running()
+    execute_scheduler.set_callback(execute_callback)
+    
+    # 5. 启动各组件
+    await phase_service.start()
+    wake_scheduler.start()
     execute_scheduler.start()
-    logger.info("Execute scheduler started with PhaseService")
+    
+    logger.info("All services started")
     
     yield
     
@@ -67,6 +96,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await execute_scheduler.stop()
     if wake_scheduler:
         wake_scheduler.stop()
+    if phase_service:
+        await phase_service.stop()
     
     logger.info("Application shutdown complete")
 
