@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from models.database import get_async_session, BatchExecute, PositionExecute
 from events.order_watcher import UnifiedOrderWatcher
+from events.order_polling import OrderPollingScheduler
 from services import create_collector, create_trader
 from plugins.order_sequence import get_plugin
 
@@ -47,6 +48,7 @@ class BatchExecutionService:
         self.trader = create_trader(trader_type)
         self.order_plugin = get_plugin(order_plugin_name)
         self.order_watcher = UnifiedOrderWatcher(self)
+        self.order_polling = OrderPollingScheduler(self, self.trader)
 
     # ==================== 批次唤醒逻辑 ====================
 

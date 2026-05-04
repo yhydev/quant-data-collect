@@ -71,6 +71,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     
     # 6. 启动各组件
     await phase_service.start()
+    await batch_service.order_polling.start()
     trading_scheduler.start()
     
     logger.info("All services started")
@@ -84,6 +85,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         trading_scheduler.stop()
     if phase_service:
         await phase_service.stop()
+    if batch_service:
+        await batch_service.order_polling.stop()
     
     logger.info("Application shutdown complete")
 
