@@ -10,10 +10,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select
 
-from .modules import create_collector, create_trader, PortfolioManager, LockManager
-from .plugins.order_sequence import get_plugin
-from .database import get_async_session, BatchExecute
-from .modules.phase_service import PhaseService, PhaseServiceConfig
+from services import create_collector, create_trader, PortfolioManager, LockManager
+from plugins.order_sequence import get_plugin
+from models.database import get_async_session, BatchExecute
+from events.phase_service import PhaseService, PhaseServiceConfig
 
 
 SLIPPAGE = Decimal('0.001')

@@ -10,7 +10,7 @@ from decimal import Decimal
 import aiohttp
 import hashlib
 import hmac
-from ..interfaces import ITrader, TradeResult
+from models.interfaces import ITrader, TradeResult
 
 
 class BinanceTrader(ITrader):

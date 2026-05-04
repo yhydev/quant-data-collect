@@ -6,9 +6,9 @@ from typing import List, Optional
 from datetime import datetime
 from sqlalchemy import select
 
-from ..database import get_async_session, PositionExecute, BatchExecute, PositionOrder
-from ..database import PositionStep, TradingHistory, FundingRateHistory, Earning
-from ..interfaces import IPortfolio, Position as PositionModel, Earning as EarningModel
+from models.database import get_async_session, PositionExecute, BatchExecute, PositionOrder
+from models.database import PositionStep, TradingHistory, FundingRateHistory, Earning
+from models.interfaces import IPortfolio, Position as PositionModel, Earning as EarningModel
 
 
 class PortfolioManager(IPortfolio):

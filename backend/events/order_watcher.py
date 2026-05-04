@@ -14,7 +14,7 @@ from datetime import datetime
 import aiohttp
 import websockets
 
-from ..database import get_async_session, get_session, BatchExecute
+from models.database import get_async_session, get_session, BatchExecute
 
 logger = logging.getLogger(__name__)
 

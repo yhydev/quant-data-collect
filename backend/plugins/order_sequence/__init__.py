@@ -1,8 +1,8 @@
 """
-Order sequence plugins.
-Plug-in system to choose execution order.
+Order sequence plugins for Binance Arbitrage Platform.
+Defines the order in which trades are executed.
 """
-from backend.interfaces import IOrderPlugin, OrderSequence
+from models.interfaces import IOrderPlugin, OrderSequence
 
 
 class FuturesFirstPlugin(IOrderPlugin):

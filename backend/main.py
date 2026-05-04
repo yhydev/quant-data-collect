@@ -8,9 +8,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from typing import AsyncGenerator
 
-from .api.routes import router as api_router
-from .database import init_db_async
-from .core import WakeScheduler, ExecuteScheduler
+from api.routes import router as api_router
+from models.database import init_db_async
+from scheduler.core import WakeScheduler, ExecuteScheduler
 
 
 # Configure logging

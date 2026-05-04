@@ -3,7 +3,7 @@ Strategy module.
 Reserved for automation - defaults to empty selection.
 """
 from typing import List
-from ..interfaces import IStrategy, FundingRate
+from models.interfaces import IStrategy, FundingRate
 
 
 class DefaultStrategy(IStrategy):
