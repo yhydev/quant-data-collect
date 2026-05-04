@@ -514,44 +514,12 @@ class BatchExecutionService:
                     pos.updated_at = datetime.utcnow()
                     await session.commit()
 
-    # ==================== 订单轮询方法（Scheduler Job 调用） ====================
+    # ==================== 订单轮询方法（一个 Scheduler Job 调用） ====================
 
-    async def poll_spot_orders(self):
+    async def poll_order_status(self):
         """
-        轮询现货订单状态（由 Scheduler Job 调用）
-        查询 DB 中现货的 *_WAIT 订单，获取订单详情，触发业务逻辑
-        """
-        # 1. 查询 DB：所有 RUNNING 且 phase 为 *_WAIT 的批次
-        async with get_async_session() as session:
-            from sqlalchemy import select, or_
-
-            result = await session.execute(
-                select(BatchExecute).where(
-                    BatchExecute.execute_status == 'RUNNING',
-                    or_(
-                        BatchExecute.phase == 'FIRST_ORDER_WAIT',
-                        BatchExecute.phase == 'SECOND_ORDER_WAIT'
-                    )
-                )
-            )
-            waiting_batches = result.scalars().all()
-
-        if not waiting_batches:
-            return
-
-        # 2. 过滤出现货订单（根据 order_sequence 判断）
-        for batch in waiting_batches:
-            is_spot = self._is_spot_order(batch)
-
-            if not is_spot:
-                continue
-
-            await self._poll_single_order(batch, is_spot=True)
-
-    async def poll_futures_orders(self):
-        """
-        轮询合约订单状态（由 Scheduler Job 调用）
-        查询 DB 中合约的 *_WAIT 订单，获取订单详情，触发业务逻辑
+        轮询所有等待中的订单状态（现货+合约，一个调度任务）
+        查询 DB 中 *_WAIT 订单，根据类型路由到不同的轮询逻辑
         """
         # 1. 查询 DB：所有 RUNNING 且 phase 为 *_WAIT 的批次
         async with get_async_session() as session:
@@ -571,14 +539,15 @@ class BatchExecutionService:
         if not waiting_batches:
             return
 
-        # 2. 过滤出合约订单
+        # 2. 轮询每个订单（根据类型自动路由）
         for batch in waiting_batches:
             is_spot = self._is_spot_order(batch)
+            order_id = self._get_order_id(batch)
 
-            if is_spot:
+            if not order_id:
                 continue
 
-            await self._poll_single_order(batch, is_spot=False)
+            await self._poll_single_order(batch, order_id, is_spot)
 
     def _is_spot_order(self, batch: BatchExecute) -> bool:
         """判断当前等待的订单是否为现货订单"""
@@ -598,13 +567,8 @@ class BatchExecutionService:
             return batch.second_side_order_id
         return None
 
-    async def _poll_single_order(self, batch: BatchExecute, is_spot: bool):
+    async def _poll_single_order(self, batch: BatchExecute, order_id: str, is_spot: bool):
         """轮询单个订单，触发业务逻辑"""
-        order_id = self._get_order_id(batch)
-
-        if not order_id:
-            return
-
         try:
             status_data = await self.trader.get_order_status(
                 batch.position.contract,

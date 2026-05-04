@@ -13,8 +13,7 @@ class TradingScheduler:
         self.scheduler = AsyncIOScheduler()
         self._wake_callback = None
         self._execute_callback = None
-        self._poll_spot_callback = None
-        self._poll_futures_callback = None
+        self._poll_callback = None
     
     def set_wake_callback(self, callback):
         """设置唤醒回调函数（由main.py注入）
@@ -28,17 +27,11 @@ class TradingScheduler:
         """
         self._execute_callback = callback
     
-    def set_poll_spot_callback(self, callback):
-        """设置现货订单轮询回调函数
+    def set_poll_callback(self, callback):
+        """设置订单轮询回调函数（现货+合约，一个任务）
         callback签名：async def callback()
         """
-        self._poll_spot_callback = callback
-    
-    def set_poll_futures_callback(self, callback):
-        """设置合约订单轮询回调函数
-        callback签名：async def callback()
-        """
-        self._poll_futures_callback = callback
+        self._poll_callback = callback
     
     def start(self):
         """启动调度器 - 注册所有定时任务"""
@@ -63,26 +56,17 @@ class TradingScheduler:
             replace_existing=True
         )
         
-        # 现货订单轮询任务
-        if self._poll_spot_callback:
+        # 订单轮询任务（现货+合约，一个任务）
+        if self._poll_callback:
             self.scheduler.add_job(
-                self._poll_spot_trigger,
+                self._poll_trigger,
                 trigger=IntervalTrigger(seconds=5),
-                id='poll_spot_orders',
-                replace_existing=True
-            )
-        
-        # 合约订单轮询任务
-        if self._poll_futures_callback:
-            self.scheduler.add_job(
-                self._poll_futures_trigger,
-                trigger=IntervalTrigger(seconds=5),
-                id='poll_futures_orders',
+                id='poll_order_status',
                 replace_existing=True
             )
         
         self.scheduler.start()
-        print("TradingScheduler started with 4 tasks")
+        print("TradingScheduler started with 3 tasks")
     
     def stop(self):
         """停止调度器"""
@@ -99,12 +83,7 @@ class TradingScheduler:
         if self._execute_callback:
             await self._execute_callback()
     
-    async def _poll_spot_trigger(self):
-        """定时触发现货订单轮询 - 只调用回调函数"""
-        if self._poll_spot_callback:
-            await self._poll_spot_callback()
-    
-    async def _poll_futures_trigger(self):
-        """定时触发合约订单轮询 - 只调用回调函数"""
-        if self._poll_futures_callback:
-            await self._poll_futures_callback()
+    async def _poll_trigger(self):
+        """定时触发订单轮询 - 只调用回调函数"""
+        if self._poll_callback:
+            await self._poll_callback()
