@@ -51,8 +51,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         order_plugin_name='futures_first'
     )
     
-    # 2. 创建events层
-    phase_service = PhaseService(PhaseServiceConfig())
+    # 2. 创建events层（需要batch_service依赖）
+    phase_service = PhaseService(batch_service)
     
     # 3. 注入依赖（service -> events）
     batch_service.set_phase_service(phase_service)

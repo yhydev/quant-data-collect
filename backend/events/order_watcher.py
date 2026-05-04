@@ -420,14 +420,14 @@ class OrderWatcher:
 
 class SchedulerOrderWatcher:
     """
-    Integration layer: OrderWatcher -> Phase Scheduler.
+    Integration layer: OrderWatcher -> BatchExecutionService.
     Maps order updates to phase transitions.
     """
     
-    def __init__(self, scheduler: Any):
-        self.scheduler = scheduler
+    def __init__(self, batch_service: BatchExecutionService):
+        self.batch_service = batch_service
         self.watcher = OrderWatcher(
-            trader=scheduler.trader,
+            trader=batch_service.trader,
             on_order_update=self._on_order_update
         )
     
@@ -525,7 +525,7 @@ class SchedulerOrderWatcher:
         spot_quantity = (batch.batch_value or 1000) / batch.spot_price if batch.spot_price else 0
         
         # Transfer to savings
-        transfer_result = await self.scheduler.trader.transfer_to_savings(
+        transfer_result = await self.batch_service.trader.transfer_to_savings(
             batch.position.contract,
             round(spot_quantity, 6)
         )
@@ -537,4 +537,4 @@ class SchedulerOrderWatcher:
         await session.commit()
         
         # Check position complete
-        await self.scheduler._check_position_complete(batch.position_execute_id)
+        await self.batch_service._check_position_complete(batch.position_execute_id)

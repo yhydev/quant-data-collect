@@ -41,13 +41,8 @@ class BatchExecutionService:
         self.collector = create_collector(collector_type)
         self.trader = create_trader(trader_type)
         self.order_plugin = get_plugin(order_plugin_name)
-        self.phase_service = None  # 由main.py注入
         
         # 不再缓存状态机，每次从数据库重新加载
-    
-    def set_phase_service(self, phase_service):
-        """注入PhaseService依赖"""
-        self.phase_service = phase_service
     
     # ==================== 批次唤醒逻辑 ====================
     
@@ -150,17 +145,12 @@ class BatchExecutionService:
     async def trigger_all_running(self) -> None:
         """
         触发所有RUNNING批次的执行
-        由scheduler定时调用，只做触发，不查询数据库
+        由scheduler定时调用，直接执行并等待所有批次完成当前阶段
         """
-        # 发布事件让event worker处理
-        if self._phase_service:
-            await self._async_trigger_all_running()
-    
-    async def _async_trigger_all_running(self) -> None:
-        """异步触发所有running批次"""
         from models.database import get_async_session
         from sqlalchemy import select
         
+        # 先收集所有需要执行的批次，避免长事务
         async with get_async_session() as session:
             result = await session.execute(
                 select(BatchExecute)
@@ -168,23 +158,25 @@ class BatchExecutionService:
                 .order_by(BatchExecute.id)
             )
             running = result.scalars().all()
+        
+        contracts_processed = set()
+        tasks = []
+        
+        for batch in running:
+            contract = batch.position.contract
             
-            contracts_processed = set()
+            # 同一合约只处理一次
+            if contract in contracts_processed:
+                continue
+            contracts_processed.add(contract)
             
-            for batch in running:
-                contract = batch.position.contract
-                
-                # 同一合约只处理一次
-                if contract in contracts_processed:
-                    continue
-                contracts_processed.add(contract)
-                
-                try:
-                    # 发布执行事件，让event handler和service层处理
-                    await self._phase_service.publish_batch_execute(batch.id)
-                    
-                except Exception as e:
-                    logger.error(f"Error triggering batch {batch.id}: {e}")
+            # 直接执行批次，创建任务
+            task = asyncio.create_task(self.execute_batch(batch.id))
+            tasks.append(task)
+        
+        # 等待所有批次执行完成（当前阶段）
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
     
     # ==================== 订单事件逻辑 ====================
     
@@ -401,3 +393,40 @@ class BatchExecutionService:
     # 不再缓存状态机，以下方法已移除：
     # get_machine, get_all_machines, active_count
     # 如需获取状态机，请使用 _create_machine_for_batch 从数据库重新创建
+    
+    async def _check_position_complete(self, position_execute_id: int):
+        """Check if all batches for a position are complete, update position status."""
+        from models.database import PositionExecute, get_async_session
+        from sqlalchemy import select
+        
+        async with get_async_session() as session:
+            # Get all batches for this position
+            result = await session.execute(
+                select(BatchExecute).where(
+                    BatchExecute.position_execute_id == position_execute_id
+                )
+            )
+            batches = list(result.scalars().all())
+            
+            # Check if all completed
+            if all(b.phase == 'COMPLETED' for b in batches):
+                result = await session.execute(
+                    select(PositionExecute).where(
+                        PositionExecute.id == position_execute_id
+                    )
+                )
+                pos = result.scalar_one_or_none()
+                
+                if pos:
+                    reasons = [b.complete_reason for b in batches]
+                    if 'TIMEOUT' in reasons:
+                        overall = 'TIMEOUT'
+                    elif any('ERROR' in r for r in reasons if r):
+                        overall = 'ERROR'
+                    else:
+                        overall = 'SUCCESS'
+                    
+                    pos.execute_status = 'COMPLETED'
+                    pos.complete_reason = overall
+                    pos.updated_at = datetime.utcnow()
+                    await session.commit()
