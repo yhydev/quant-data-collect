@@ -106,43 +106,36 @@ class PositionScheduler:
     
     # ===== Job 1: 唤醒pending批次 =====
     async def _wake_pending_batches(self):
-        """
-        定时任务1: 唤醒pending批次
-        - 将没有RUNNING的合约的PENDING批次转为RUNNING
-        - 同一合约只唤醒ID最小的批次
-        """
+        """唤醒PENDING批次，每个合约只唤醒ID最小的"""
         async with get_async_session() as session:
-            # 获取已有RUNNING的合约
-            contracts_running = set()
+            # 1. 获取已有RUNNING的合约
             result = await session.execute(
                 select(BatchExecute).where(BatchExecute.execute_status == 'RUNNING')
             )
-            running = list(result.scalars().all())
-            for batch in running:
-                contracts_running.add(batch.position.contract)
+            contracts_running = {batch.position.contract for batch in result.scalars().all()}
             
-            # 按ID排序，唤醒最小的
+            # 2. 获取所有PENDING批次，按合约分组取最小ID
             result = await session.execute(
-                select(BatchExecute).where(BatchExecute.execute_status == 'PENDING').order_by(BatchExecute.id)
+                select(BatchExecute)
+                .where(BatchExecute.execute_status == 'PENDING')
+                .order_by(BatchExecute.id)
             )
-            pending = list(result.scalars().all())
             
-            woken = 0
-            for batch in pending:
+            # 每个合约只取第一个（ID最小）
+            contract_min_batch = {}
+            for batch in result.scalars().all():
                 contract = batch.position.contract
-                
-                if contract in contracts_running:
-                    continue
-                
-                # 唤醒
-                batch.execute_status = 'RUNNING'
-                batch.phase = 'PENDING'
-                batch.updated_at = datetime.utcnow()
-                await session.commit()
-                
-                contracts_running.add(contract)
-                woken += 1
-                print(f"Batch {batch.id} woken: contract={contract}")
+                if contract not in contract_min_batch:
+                    contract_min_batch[contract] = batch
+            
+            # 3. 唤醒不在RUNNING中的合约批次
+            woken = 0
+            for contract, batch in contract_min_batch.items():
+                if contract not in contracts_running:
+                    batch.execute_status = 'RUNNING'
+                    batch.updated_at = datetime.utcnow()
+                    await session.commit()
+                    woken += 1
             
             if woken > 0:
                 print(f"Woke {woken} pending batches")
@@ -443,14 +436,8 @@ class CloseScheduler:
     
     def start(self):
         """Start close scheduler."""
-        # Job 1: 唤醒待平仓
-        self.scheduler.add_job(
-            self._wake_pending_closes,
-            trigger=IntervalTrigger(seconds=1),
-            id='wake_pending_closes',
-            replace_existing=True
-        )
-        # Job 2: 执行平仓
+        # 唤醒任务已由PositionScheduler统一处理
+        # Job: 执行平仓
         self.scheduler.add_job(
             self._execute_closes,
             trigger=IntervalTrigger(seconds=1),
