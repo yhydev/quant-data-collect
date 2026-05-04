@@ -11,6 +11,8 @@ from sqlalchemy import select
 
 from models.database import get_session, BatchExecute
 from events.order_watcher import SchedulerOrderWatcher
+from services import create_collector, create_trader
+from plugins.order_sequence import get_plugin
 
 # 延迟导入，避免循环导入
 BatchPhaseMachine = None
@@ -19,11 +21,6 @@ PhaseState = None
 def _get_phase_machine_module():
     from events.phase_machine import BatchPhaseMachine as BPM, PhaseState as PS
     return BPM, PS
-
-logger = logging.getLogger(__name__)
-
-SLIPPAGE = Decimal('0.001')
-DEFAULT_ORDER_TIMEOUT = 300
 
 
 class BatchExecutionService:
@@ -37,14 +34,20 @@ class BatchExecutionService:
     4. 管理状态机
     """
     
-    def __init__(self, collector, trader, order_plugin, order_watcher):
-        self.collector = collector
-        self.trader = trader
-        self.order_plugin = order_plugin
-        self.order_watcher = order_watcher
+    def __init__(self, collector_type='binance', trader_type='binance', 
+                 order_plugin_name='futures_first'):
+        # 创建依赖（也可以由main.py注入）
+        self.collector = create_collector(collector_type)
+        self.trader = create_trader(trader_type)
+        self.order_plugin = get_plugin(order_plugin_name)
+        self.phase_service = None  # 由main.py注入
         
         # State machines: batch_id -> machine
         self._machines: Dict[int, BatchPhaseMachine] = {}
+    
+    def set_phase_service(self, phase_service):
+        """注入PhaseService依赖"""
+        self.phase_service = phase_service
     
     # ==================== 批次唤醒逻辑 ====================
     

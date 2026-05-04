@@ -56,13 +56,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     
     # ========== 依赖注入：main.py负责组装所有组件 ==========
     
-    # 1. 创建services层
+    # 1. 创建services层（BatchExecutionService自己创建依赖）
     batch_service = BatchExecutionService(
-        collector=None,  # 由BatchExecutionService内部创建
-        trader=None,
-        order_plugin=None,
-        order_watcher=None
+        collector_type='binance',
+        trader_type='binance',
+        order_plugin_name='futures_first'
     )
+    
+    # 2. 创建events层
+    phase_service = PhaseService(PhaseServiceConfig())
+    
+    # 3. 注入依赖（service -> events）
+    batch_service.set_phase_service(phase_service)
     
     # 2. 创建events层
     phase_service = PhaseService(PhaseServiceConfig())
