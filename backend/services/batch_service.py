@@ -152,28 +152,18 @@ class BatchExecutionService:
         finally:
             session.close()
     
-    def execute_all_running_batches(self) -> int:
+    def trigger_all_running(self) -> None:
         """
-        执行所有RUNNING批次
-        
-        Returns:
-            成功执行的批次数量
+        触发所有RUNNING批次的执行
+        由scheduler定时调用，只做触发，不查询数据库
         """
-        from models.database import get_async_session
-        from sqlalchemy import select
-        
-        # 使用asyncio获取所有running批次
-        import asyncio
-        if asyncio.get_event_loop().is_running():
-            # 如果在async上下文中，创建task
-            return asyncio.ensure_future(self._async_execute_all_running())
-        else:
-            return asyncio.get_event_loop().run_until_complete(
-                self._async_execute_all_running()
-            )
+        # 发布事件让event worker处理
+        if self._phase_service:
+            import asyncio
+            asyncio.create_task(self._async_trigger_all_running())
     
-    async def _async_execute_all_running(self) -> int:
-        """异步执行所有running批次"""
+    async def _async_trigger_all_running(self) -> None:
+        """异步触发所有running批次"""
         from models.database import get_async_session
         from sqlalchemy import select
         
@@ -186,7 +176,6 @@ class BatchExecutionService:
             running = result.scalars().all()
             
             contracts_processed = set()
-            executed = 0
             
             for batch in running:
                 contract = batch.position.contract
@@ -197,25 +186,11 @@ class BatchExecutionService:
                 contracts_processed.add(contract)
                 
                 try:
-                    # 检查超时
-                    elapsed = (datetime.utcnow() - batch.updated_at).total_seconds()
-                    if elapsed > batch.timeout:
-                        batch.execute_status = 'COMPLETED'
-                        batch.complete_reason = 'TIMEOUT'
-                        await session.commit()
-                        continue
-                    
-                    # 执行批次
-                    if self.execute_batch(batch.id):
-                        executed += 1
+                    # 发布执行事件，让event handler和service层处理
+                    await self._phase_service.publish_batch_execute(batch.id)
                     
                 except Exception as e:
-                    logger.error(f"Error executing batch {batch.id}: {e}")
-                    batch.execute_status = 'COMPLETED'
-                    batch.complete_reason = f'ERROR: {str(e)}'
-                    await session.commit()
-            
-            return executed
+                    logger.error(f"Error triggering batch {batch.id}: {e}")
     
     # ==================== 订单事件逻辑 ====================
     

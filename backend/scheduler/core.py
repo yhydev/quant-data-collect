@@ -52,11 +52,16 @@ class ExecuteScheduler:
     
     def __init__(self, phase_service=None):
         self.phase_service = phase_service
+        self._batch_service = None
         self.scheduler = AsyncIOScheduler()
     
     def set_phase_service(self, phase_service):
         """设置PhaseService依赖"""
         self.phase_service = phase_service
+    
+    def set_batch_service(self, batch_service):
+        """设置BatchExecutionService依赖"""
+        self._batch_service = batch_service
     
     def start(self):
         """启动执行调度器"""
@@ -88,7 +93,15 @@ class ExecuteScheduler:
         if not self.phase_service:
             return
         
-        # 获取所有RUNNING批次，让service层处理
+        # 让BatchExecutionService处理所有逻辑
+        if self._batch_service:
+            await self._batch_service.trigger_all_running()
+        else:
+            # 如果没有batch_service，直接通过phase_service发布事件
+            await self._trigger_all_running()
+    
+    async def _trigger_all_running(self):
+        """备用方法：直接通过phase_service触发"""
         from models.database import get_async_session, BatchExecute
         from sqlalchemy import select
         
@@ -105,14 +118,11 @@ class ExecuteScheduler:
             for batch in running:
                 contract = batch.position.contract
                 
-                # 同一合约只处理一次
                 if contract in contracts_processed:
                     continue
                 contracts_processed.add(contract)
                 
                 try:
-                    # 发布执行事件，让service层处理所有逻辑（包括超时检查）
                     await self.phase_service.publish_batch_execute(batch.id)
-                    
                 except Exception as e:
                     print(f"Error triggering batch {batch.id}: {e}")
