@@ -1,6 +1,9 @@
 """
-Order watcher with hybrid approach: WebSocket + Polling fallback.
-Monitors order status changes and triggers callbacks.
+Order watcher split into 4 components:
+- SpotWebSocketWatcher: WebSocket for spot order updates
+- FuturesWebSocketWatcher: WebSocket for futures order updates  
+- SpotPollingTask: Polling fallback for spot orders
+- FuturesPollingTask: Polling fallback for futures orders
 """
 import asyncio
 import logging
@@ -14,7 +17,7 @@ from datetime import datetime
 import aiohttp
 import websockets
 
-from models.database import get_async_session, get_session, BatchExecute
+from models.database import get_async_session, BatchExecute
 
 logger = logging.getLogger(__name__)
 
@@ -40,186 +43,280 @@ class OrderUpdate:
     filled_quantity: float = 0.0
     avg_price: float = 0.0
     update_time: datetime = field(default_factory=datetime.utcnow)
+    is_spot: bool = False
 
 
 @dataclass
 class WatcherConfig:
-    """Configuration for order watcher."""
+    """Configuration for order watchers."""
     # WebSocket settings
-    ws_url: str = "wss://fstream.binance.com/stream"
+    spot_ws_url: str = "wss://stream.binance.com:9443/stream"
+    futures_ws_url: str = "wss://fstream.binance.com/stream"
     ws_reconnect_interval: int = 5  # seconds
     ws_ping_interval: int = 30
     
-    # Polling fallback settings
-    use_polling_fallback: bool = True
+    # Polling settings
     polling_intervals: list = field(default_factory=lambda: [1, 1, 2, 2, 5, 5, 10, 30, 60])
-    
-    # Timeout settings
     default_timeout: int = 300  # 5 minutes
 
 
-class OrderWatcher:
-    """
-    Hybrid order watcher: WebSocket + Polling fallback.
+class SpotWebSocketWatcher:
+    """WebSocket watcher for spot order updates."""
     
-    Primary: WebSocket for real-time updates
-    Fallback: Polling when WebSocket fails
-    """
-    
-    def __init__(
-        self,
-        trader: Any,
-        config: WatcherConfig = None,
-        on_order_update: Callable[[OrderUpdate], asyncio.coroutines] = None
-    ):
-        self.trader = trader
+    def __init__(self, config: WatcherConfig = None):
         self.config = config or WatcherConfig()
-        self.on_order_update = on_order_update
+        self.on_order_update: Callable[[OrderUpdate], None] = None
         
-        # State
         self._ws = None
         self._ws_task: Optional[asyncio.Task] = None
         self._running = False
         self._connected = False
+        self._listen_key = None
         
-        # Active watchers: order_id -> info
+        # Active orders being watched
         self._watching_orders: Dict[str, Dict[str, Any]] = {}
-        
-        # Fallback polling tasks
-        self._polling_tasks: Dict[str, asyncio.Task] = {}
         
         # Metrics
         self._ws_messages = 0
-        self._polling_queries = 0
     
     async def start(self):
-        """Start the watcher."""
+        """Start the WebSocket watcher."""
         self._running = True
-        
-        # Start WebSocket listener
         self._ws_task = asyncio.create_task(self._ws_loop())
-        
-        logger.info("OrderWatcher started")
+        logger.info("SpotWebSocketWatcher started")
     
     async def stop(self):
-        """Stop the watcher gracefully."""
+        """Stop the watcher."""
         self._running = False
         
-        # 1. Cancel WebSocket task
         if self._ws_task:
             self._ws_task.cancel()
             try:
                 await self._ws_task
             except asyncio.CancelledError:
                 pass
-            self._ws_task = None
         
-        # 2. Cancel all polling tasks
-        for task in self._polling_tasks.values():
-            task.cancel()
-        self._polling_tasks.clear()
-        
-        # 3. Close WebSocket
         if self._ws:
             await self._ws.close()
             self._ws = None
         
-        logger.info(f"OrderWatcher stopped. WS msgs: {self._ws_messages}, Polling queries: {self._polling_queries}")
+        logger.info(f"SpotWebSocketWatcher stopped. Messages: {self._ws_messages}")
     
-    async def watch(self, order_id: str, symbol: str, timeout: int = None):
-        """
-        Watch an order for status changes.
-        
-        Args:
-            order_id: Order ID to watch
-            symbol: Trading symbol
-            timeout: Watch timeout in seconds
-        """
-        if not self._running:
-            raise RuntimeError("Watcher not started")
-        
-        timeout = timeout or self.config.default_timeout
-        
-        info = {
-            'order_id': order_id,
+    def watch(self, order_id: str, symbol: str, batch_id: int, phase: str):
+        """Add an order to watch."""
+        self._watching_orders[order_id] = {
             'symbol': symbol,
-            'watched_at': datetime.utcnow(),
-            'timeout': timeout,
-            'status': OrderStatus.PENDING
+            'batch_id': batch_id,
+            'phase': phase,
+            'is_spot': True
         }
-        
-        self._watching_orders[order_id] = info
-        
-        # Start polling fallback if WebSocket not connected
-        if self.config.use_polling_fallback and not self._connected:
-            self._start_polling(order_id, symbol)
-        
-        logger.debug(f"Watching order {order_id} on {symbol}")
     
-    async def unwatch(self, order_id: str):
-        """Stop watching an order."""
-        # Cancel polling task
-        if order_id in self._polling_tasks:
-            self._polling_tasks[order_id].cancel()
-            del self._polling_tasks[order_id]
-        
-        # Remove from watching
-        if order_id in self._watching_orders:
-            del self._watching_orders[order_id]
-    
-    # ==================== WebSocket ====================
+    def unwatch(self, order_id: str):
+        """Remove an order from watching."""
+        self._watching_orders.pop(order_id, None)
     
     async def _ws_loop(self):
-        """WebSocket connection loop with auto-reconnect."""
+        """WebSocket connection loop with reconnect."""
         while self._running:
             try:
                 await self._ws_connect()
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning(f"WebSocket error: {e}, reconnecting in {self.config.ws_reconnect_interval}s")
+                logger.warning(f"Spot WS error: {e}, reconnecting in {self.config.ws_reconnect_interval}s")
             
             if self._running:
                 await asyncio.sleep(self.config.ws_reconnect_interval)
     
     async def _ws_connect(self):
-        """Connect to WebSocket and subscribe."""
-        logger.info("Connecting to WebSocket...")
+        """Connect to spot WebSocket with user data stream."""
+        # Get listenKey for user data stream
+        listen_key = await self._get_listen_key()
+        if not listen_key:
+            raise Exception("Failed to get listenKey")
+        
+        ws_url = f"{self.config.spot_ws_url}?streams={listen_key}"
         
         async with websockets.connect(
-            self.config.ws_url,
+            ws_url,
             ping_interval=self.config.ws_ping_interval
         ) as ws:
             self._ws = ws
             self._connected = True
             
-            # Subscribe to order updates for all watched orders
-            await self._ws_subscribe()
-            
-            # Listen for messages
-            try:
-                async for message in ws:
-                    if not self._running:
-                        break
-                    await self._ws_handle_message(message)
-            except websockets.ConnectionClosed:
-                self._connected = False
-                raise
+            async for message in ws:
+                if not self._running:
+                    break
+                await self._handle_message(message)
+        
+        self._connected = False
     
-    async def _ws_subscribe(self):
-        """Subscribe to order update streams."""
-        if not self._ws or not self._watching_orders:
+    async def _get_listen_key(self) -> Optional[str]:
+        """Get listenKey for user data stream."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                # This should use the trader's API key/secret
+                # Simplified for now
+                return None
+        except Exception as e:
+            logger.error(f"Failed to get listenKey: {e}")
+            return None
+    
+    async def _handle_message(self, message: str):
+        """Handle WebSocket message."""
+        self._ws_messages += 1
+        
+        try:
+            data = json.loads(message)
+            
+            # Handle user data stream
+            if 'data' in data:
+                event_data = data['data']
+                if event_data.get('e') == 'executionReport':
+                    await self._process_execution_report(event_data)
+                    
+        except json.JSONDecodeError:
+            logger.warning(f"Invalid JSON: {message[:100]}")
+        except Exception as e:
+            logger.error(f"Error handling spot WS message: {e}")
+    
+    async def _process_execution_report(self, data: Dict):
+        """Process execution report from spot WebSocket."""
+        order_id = str(data.get('i'))  # orderId
+        
+        if order_id not in self._watching_orders:
             return
         
-        # Note: For spot orders, Binance requires user data stream (listenKey)
-        # For futures, we can use <symbol>@executionReport
-        # This is a simplified version - production should handle both
+        status_code = data.get('X')  # orderStatus
+        status = self._parse_status(status_code)
+        
+        if status == OrderStatus.UNKNOWN:
+            return
+        
+        update = OrderUpdate(
+            order_id=order_id,
+            symbol=data.get('s', ''),
+            status=status,
+            filled_price=float(data.get('L', 0)),
+            filled_quantity=float(data.get('z', 0)),
+            avg_price=float(data.get('ap', 0)),
+            is_spot=True
+        )
+        
+        logger.info(f"Spot WS update: {order_id} -> {status.value}")
+        
+        if self.on_order_update:
+            await self.on_order_update(update)
+        
+        # Auto-unwatch if completed
+        if status in (OrderStatus.FILLED, OrderStatus.CANCELLED, 
+                      OrderStatus.REJECTED, OrderStatus.EXPIRED):
+            self.unwatch(order_id)
+    
+    def _parse_status(self, status_code: str) -> OrderStatus:
+        """Parse status code to OrderStatus."""
+        mapping = {
+            'NEW': OrderStatus.PENDING,
+            'PARTIALLY_FILLED': OrderStatus.PARTIALLY_FILLED,
+            'FILLED': OrderStatus.FILLED,
+            'CANCELLED': OrderStatus.CANCELLED,
+            'REJECTED': OrderStatus.REJECTED,
+            'EXPIRED': OrderStatus.EXPIRED,
+        }
+        return mapping.get(status_code, OrderStatus.UNKNOWN)
+
+
+class FuturesWebSocketWatcher:
+    """WebSocket watcher for futures order updates."""
+    
+    def __init__(self, config: WatcherConfig = None):
+        self.config = config or WatcherConfig()
+        self.on_order_update: Callable[[OrderUpdate], None] = None
+        
+        self._ws = None
+        self._ws_task: Optional[asyncio.Task] = None
+        self._running = False
+        self._connected = False
+        
+        # Active orders being watched
+        self._watching_orders: Dict[str, Dict[str, Any]] = {}
+        
+        # Metrics
+        self._ws_messages = 0
+    
+    async def start(self):
+        """Start the WebSocket watcher."""
+        self._running = True
+        self._ws_task = asyncio.create_task(self._ws_loop())
+        logger.info("FuturesWebSocketWatcher started")
+    
+    async def stop(self):
+        """Stop the watcher."""
+        self._running = False
+        
+        if self._ws_task:
+            self._ws_task.cancel()
+            try:
+                await self._ws_task
+            except asyncio.CancelledError:
+                pass
+        
+        if self._ws:
+            await self._ws.close()
+            self._ws = None
+        
+        logger.info(f"FuturesWebSocketWatcher stopped. Messages: {self._ws_messages}")
+    
+    def watch(self, order_id: str, symbol: str, batch_id: int, phase: str):
+        """Add an order to watch."""
+        self._watching_orders[order_id] = {
+            'symbol': symbol.lower(),
+            'batch_id': batch_id,
+            'phase': phase,
+            'is_spot': False
+        }
+    
+    def unwatch(self, order_id: str):
+        """Remove an order from watching."""
+        self._watching_orders.pop(order_id, None)
+    
+    async def _ws_loop(self):
+        """WebSocket connection loop with reconnect."""
+        while self._running:
+            try:
+                await self._ws_connect()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Futures WS error: {e}, reconnecting in {self.config.ws_reconnect_interval}s")
+            
+            if self._running:
+                await asyncio.sleep(self.config.ws_reconnect_interval)
+    
+    async def _ws_connect(self):
+        """Connect to futures WebSocket."""
+        async with websockets.connect(
+            self.config.futures_ws_url,
+            ping_interval=self.config.ws_ping_interval
+        ) as ws:
+            self._ws = ws
+            self._connected = True
+            
+            # Subscribe to execution reports for all watched symbols
+            await self._subscribe()
+            
+            async for message in ws:
+                if not self._running:
+                    break
+                await self._handle_message(message)
+        
+        self._connected = False
+    
+    async def _subscribe(self):
+        """Subscribe to order update streams."""
         symbols = set()
         for info in self._watching_orders.values():
-            symbol = info['symbol'].lower()
-            # For now, only subscribe to futures execution reports
-            # Spot orders should use user data stream with listenKey
-            symbols.add(f"{symbol}@executionReport")
+            symbols.add(f"{info['symbol']}@executionReport")
         
         if symbols:
             await self._ws.send(json.dumps({
@@ -227,116 +324,133 @@ class OrderWatcher:
                 "params": list(symbols),
                 "id": int(time.time() * 1000)
             }))
-            logger.debug(f"Subscribed to {len(symbols)} streams")
+            logger.debug(f"Subscribed to {len(symbols)} futures streams")
     
-    async def _ws_handle_message(self, message: str):
+    async def _handle_message(self, message: str):
         """Handle WebSocket message."""
         self._ws_messages += 1
         
         try:
             data = json.loads(message)
             
-            # Check for error
             if 'error' in data:
-                logger.error(f"WS error: {data}")
+                logger.error(f"Futures WS error: {data}")
                 return
             
             # Handle stream data
             if 'data' in data:
-                await self._ws_process_update(data['data'])
+                await self._process_execution_report(data['data'])
             elif 'e' in data:  # Direct execution report
-                await self._ws_process_update(data)
+                await self._process_execution_report(data)
                 
         except json.JSONDecodeError:
             logger.warning(f"Invalid JSON: {message[:100]}")
+        except Exception as e:
+            logger.error(f"Error handling futures WS message: {e}")
     
-    async def _ws_process_update(self, data: Dict):
-        """Process order execution report."""
+    async def _process_execution_report(self, data: Dict):
+        """Process execution report from futures WebSocket."""
         order_id = str(data.get('i'))  # orderId
-        symbol = data.get('s')          # symbol
-        status_code = data.get('X')     # orderStatus
         
-        # Find matching order
         if order_id not in self._watching_orders:
             return
         
-        info = self._watching_orders[order_id]
+        status_code = data.get('X')  # orderStatus
+        status = self._parse_status(status_code)
         
-        # Parse status
-        status = OrderStatus.UNKNOWN
-        if status_code == 'NEW':
-            status = OrderStatus.PENDING
-        elif status_code == 'PARTIALLY_FILLED':
-            status = OrderStatus.PARTIALLY_FILLED
-        elif status_code == 'FILLED':
-            status = OrderStatus.FILLED
-        elif status_code == 'CANCELLED':
-            status = OrderStatus.CANCELLED
-        elif status_code == 'EXPIRED':
-            status = OrderStatus.EXPIRED
-        elif status_code == 'REJECTED':
-            status = OrderStatus.REJECTED
+        if status == OrderStatus.UNKNOWN:
+            return
         
-        # Create update event
         update = OrderUpdate(
             order_id=order_id,
-            symbol=symbol,
+            symbol=data.get('s', ''),
             status=status,
-            filled_price=float(data.get('L', 0)),  # lastPrice
-            filled_quantity=float(data.get('z', 0)),  # cumulativeFilledQty
-            avg_price=float(data.get('ap', 0))  # avgPrice
+            filled_price=float(data.get('L', 0)),
+            filled_quantity=float(data.get('z', 0)),
+            avg_price=float(data.get('ap', 0)),
+            is_spot=False
         )
         
-        logger.info(f"WS Order update: {order_id} -> {status.value}")
+        logger.info(f"Futures WS update: {order_id} -> {status.value}")
         
-        # Trigger callback
         if self.on_order_update:
             await self.on_order_update(update)
         
         # Auto-unwatch if completed
         if status in (OrderStatus.FILLED, OrderStatus.CANCELLED, 
                       OrderStatus.REJECTED, OrderStatus.EXPIRED):
-            await self.unwatch(order_id)
+            self.unwatch(order_id)
     
-    # ==================== Polling Fallback ====================
+    def _parse_status(self, status_code: str) -> OrderStatus:
+        """Parse status code to OrderStatus."""
+        mapping = {
+            'NEW': OrderStatus.PENDING,
+            'PARTIALLY_FILLED': OrderStatus.PARTIALLY_FILLED,
+            'FILLED': OrderStatus.FILLED,
+            'CANCELLED': OrderStatus.CANCELLED,
+            'REJECTED': OrderStatus.REJECTED,
+            'EXPIRED': OrderStatus.EXPIRED,
+        }
+        return mapping.get(status_code, OrderStatus.UNKNOWN)
+
+
+class SpotPollingTask:
+    """Polling task for spot order status."""
     
-    def _start_polling(self, order_id: str, symbol: str):
-        """Start polling fallback for an order."""
-        if order_id in self._polling_tasks:
+    def __init__(self, trader, config: WatcherConfig = None):
+        self.trader = trader
+        self.config = config or WatcherConfig()
+        self.on_order_update: Callable[[OrderUpdate], None] = None
+        
+        self._running = False
+        self._tasks: Dict[str, asyncio.Task] = {}
+        self._polling_queries = 0
+    
+    async def start(self):
+        """Start the polling task manager."""
+        self._running = True
+        logger.info("SpotPollingTask started")
+    
+    async def stop(self):
+        """Stop all polling tasks."""
+        self._running = False
+        
+        for task in self._tasks.values():
+            task.cancel()
+        self._tasks.clear()
+        
+        logger.info(f"SpotPollingTask stopped. Queries: {self._polling_queries}")
+    
+    def watch(self, order_id: str, symbol: str, batch_id: int, phase: str):
+        """Start polling for an order."""
+        if order_id in self._tasks:
             return
         
         task = asyncio.create_task(
-            self._polling_loop(order_id, symbol)
+            self._poll_loop(order_id, symbol, batch_id, phase)
         )
-        self._polling_tasks[order_id] = task
+        self._tasks[order_id] = task
     
-    async def _polling_loop(self, order_id: str, symbol: str):
+    def unwatch(self, order_id: str):
+        """Stop polling for an order."""
+        if order_id in self._tasks:
+            self._tasks[order_id].cancel()
+            del self._tasks[order_id]
+    
+    async def _poll_loop(self, order_id: str, symbol: str, batch_id: int, phase: str):
         """Polling loop with exponential backoff."""
         intervals = self.config.polling_intervals
         start_time = time.time()
         
-        # Determine if this is a spot order based on watch info
-        is_spot = False
-        if order_id in self._watching_orders:
-            info = self._watching_orders[order_id]
-            is_spot = info.get('is_spot', False)
-        
         for interval in intervals:
-            if not self._running or order_id not in self._watching_orders:
+            if not self._running or order_id not in self._tasks:
                 return
             
-            # Check if WebSocket is connected - switch to WS
-            if self._connected:
-                logger.debug(f"WebSocket connected, stopping polling for {order_id}")
-                return
-            
-            # Wait
             await asyncio.sleep(interval)
             self._polling_queries += 1
             
-            # Check order status
             try:
-                status_data = await self.trader.get_order_status(symbol, int(order_id), is_spot)
+                status_data = await self.trader.get_order_status(symbol, int(order_id), is_spot=True)
                 status = status_data.get('status', 'UNKNOWN')
                 
                 if status == 'FILLED':
@@ -344,16 +458,18 @@ class OrderWatcher:
                         order_id=order_id,
                         symbol=symbol,
                         status=OrderStatus.FILLED,
-                        avg_price=float(status_data.get('avgPrice', 0))
+                        avg_price=float(status_data.get('avgPrice', 0)),
+                        is_spot=True
                     )
-                    logger.info(f"Polling order filled: {order_id}")
+                    
+                    logger.info(f"Spot polling: order {order_id} filled")
                     
                     if self.on_order_update:
                         await self.on_order_update(update)
                     
-                    await self.unwatch(order_id)
+                    self.unwatch(order_id)
                     return
-                
+                    
                 elif status in ('CANCELLED', 'EXPIRED', 'REJECTED'):
                     update = OrderUpdate(
                         order_id=order_id,
@@ -364,109 +480,226 @@ class OrderWatcher:
                     if self.on_order_update:
                         await self.on_order_update(update)
                     
-                    await self.unwatch(order_id)
+                    self.unwatch(order_id)
                     return
                     
             except Exception as e:
-                logger.warning(f"Polling error for {order_id}: {e}")
+                logger.warning(f"Spot polling error for {order_id}: {e}")
         
         # Timeout - continue with long interval
-        while True:
-            if not self._running or order_id not in self._watching_orders:
-                return
-            
+        while self._running and order_id in self._tasks:
             await asyncio.sleep(60)
             self._polling_queries += 1
             
-            # Check one more time
             try:
-                status_data = await self.trader.get_order_status(symbol, int(order_id), is_spot)
+                status_data = await self.trader.get_order_status(symbol, int(order_id), is_spot=True)
                 if status_data.get('status') == 'FILLED':
                     update = OrderUpdate(
                         order_id=order_id,
                         symbol=symbol,
-                        status=OrderStatus.FILLED
+                        status=OrderStatus.FILLED,
+                        is_spot=True
                     )
                     if self.on_order_update:
                         await self.on_order_update(update)
-                    await self.unwatch(order_id)
+                    self.unwatch(order_id)
                     return
             except Exception:
                 pass
-    
-    # ==================== Utilities ====================
-    
-    @property
-    def is_connected(self) -> bool:
-        """Check if WebSocket is connected."""
-        return self._connected
-    
-    @property
-    def active_watches(self) -> int:
-        """Number of active order watches."""
-        return len(self._watching_orders)
-    
-    def get_stats(self) -> Dict:
-        """Get watcher statistics."""
-        return {
-            'connected': self._connected,
-            'active_watches': self.active_watches,
-            'ws_messages': self._ws_messages,
-            'polling_queries': self._polling_queries
-        }
 
 
-# ==================== Integration with Scheduler ====================
-
-class SchedulerOrderWatcher:
-    """
-    Integration layer: OrderWatcher -> BatchExecutionService.
-    Maps order updates to phase transitions.
-    """
+class FuturesPollingTask:
+    """Polling task for futures order status."""
     
-    def __init__(self, batch_service: BatchExecutionService):
-        self.batch_service = batch_service
-        self.watcher = OrderWatcher(
-            trader=batch_service.trader,
-            on_order_update=self._on_order_update
-        )
+    def __init__(self, trader, config: WatcherConfig = None):
+        self.trader = trader
+        self.config = config or WatcherConfig()
+        self.on_order_update: Callable[[OrderUpdate], None] = None
+        
+        self._running = False
+        self._tasks: Dict[str, asyncio.Task] = {}
+        self._polling_queries = 0
     
     async def start(self):
-        """Start the watcher."""
-        await self.watcher.start()
+        """Start the polling task manager."""
+        self._running = True
+        logger.info("FuturesPollingTask started")
     
     async def stop(self):
-        """Stop the watcher."""
-        await self.watcher.stop()
+        """Stop all polling tasks."""
+        self._running = False
+        
+        for task in self._tasks.values():
+            task.cancel()
+        self._tasks.clear()
+        
+        logger.info(f"FuturesPollingTask stopped. Queries: {self._polling_queries}")
+    
+    def watch(self, order_id: str, symbol: str, batch_id: int, phase: str):
+        """Start polling for an order."""
+        if order_id in self._tasks:
+            return
+        
+        task = asyncio.create_task(
+            self._poll_loop(order_id, symbol, batch_id, phase)
+        )
+        self._tasks[order_id] = task
+    
+    def unwatch(self, order_id: str):
+        """Stop polling for an order."""
+        if order_id in self._tasks:
+            self._tasks[order_id].cancel()
+            del self._tasks[order_id]
+    
+    async def _poll_loop(self, order_id: str, symbol: str, batch_id: int, phase: str):
+        """Polling loop with exponential backoff."""
+        intervals = self.config.polling_intervals
+        
+        for interval in intervals:
+            if not self._running or order_id not in self._tasks:
+                return
+            
+            await asyncio.sleep(interval)
+            self._polling_queries += 1
+            
+            try:
+                status_data = await self.trader.get_order_status(symbol, int(order_id), is_spot=False)
+                status = status_data.get('status', 'UNKNOWN')
+                
+                if status == 'FILLED':
+                    update = OrderUpdate(
+                        order_id=order_id,
+                        symbol=symbol,
+                        status=OrderStatus.FILLED,
+                        avg_price=float(status_data.get('avgPrice', 0)),
+                        is_spot=False
+                    )
+                    
+                    logger.info(f"Futures polling: order {order_id} filled")
+                    
+                    if self.on_order_update:
+                        await self.on_order_update(update)
+                    
+                    self.unwatch(order_id)
+                    return
+                    
+                elif status in ('CANCELLED', 'EXPIRED', 'REJECTED'):
+                    update = OrderUpdate(
+                        order_id=order_id,
+                        symbol=symbol,
+                        status=OrderStatus(status)
+                    )
+                    
+                    if self.on_order_update:
+                        await self.on_order_update(update)
+                    
+                    self.unwatch(order_id)
+                    return
+                    
+            except Exception as e:
+                logger.warning(f"Futures polling error for {order_id}: {e}")
+        
+        # Timeout - continue with long interval
+        while self._running and order_id in self._tasks:
+            await asyncio.sleep(60)
+            self._polling_queries += 1
+            
+            try:
+                status_data = await self.trader.get_order_status(symbol, int(order_id), is_spot=False)
+                if status_data.get('status') == 'FILLED':
+                    update = OrderUpdate(
+                        order_id=order_id,
+                        symbol=symbol,
+                        status=OrderStatus.FILLED,
+                        is_spot=False
+                    )
+                    if self.on_order_update:
+                        await self.on_order_update(update)
+                    self.unwatch(order_id)
+                    return
+            except Exception:
+                pass
+
+
+class UnifiedOrderWatcher:
+    """
+    Unified order watcher that combines all 4 components.
+    Simplifies integration with BatchExecutionService.
+    """
+    
+    def __init__(self, batch_service, config: WatcherConfig = None):
+        self.batch_service = batch_service
+        self.config = config or WatcherConfig()
+        
+        # Create 4 components
+        self.spot_ws = SpotWebSocketWatcher(self.config)
+        self.futures_ws = FuturesWebSocketWatcher(self.config)
+        self.spot_polling = SpotPollingTask(batch_service.trader, self.config)
+        self.futures_polling = FuturesPollingTask(batch_service.trader, self.config)
+        
+        # Set callbacks
+        self.spot_ws.on_order_update = self._on_order_update
+        self.futures_ws.on_order_update = self._on_order_update
+        self.spot_polling.on_order_update = self._on_order_update
+        self.futures_polling.on_order_update = self._on_order_update
+        
+        self._running = False
+    
+    async def start(self):
+        """Start all watchers."""
+        self._running = True
+        
+        await self.spot_ws.start()
+        await self.futures_ws.start()
+        await self.spot_polling.start()
+        await self.futures_polling.start()
+        
+        logger.info("UnifiedOrderWatcher started (4 components)")
+    
+    async def stop(self):
+        """Stop all watchers."""
+        self._running = False
+        
+        await self.spot_ws.stop()
+        await self.futures_ws.stop()
+        await self.spot_polling.stop()
+        await self.futures_polling.stop()
+        
+        logger.info("UnifiedOrderWatcher stopped")
     
     async def watch_order(self, batch_id: int, order_id: str, symbol: str, 
-                       phase: str, timeout: int = 300, is_spot: bool = False):
-        """
-        Watch an order and trigger phase transition on fill.
-        
-        Args:
-            batch_id: Batch ID
-            order_id: Order ID
-            symbol: Trading symbol
-            phase: Current phase (e.g., 'FIRST_ORDER_WAIT')
-            timeout: Watch timeout in seconds
-            is_spot: True if this is a spot order
-        """
-        await self.watcher.watch(order_id, symbol, timeout)
-        
-        # Store phase mapping for callback
-        self.watcher._watching_orders[order_id]['batch_id'] = batch_id
-        self.watcher._watching_orders[order_id]['phase'] = phase
-        self.watcher._watching_orders[order_id]['is_spot'] = is_spot
+                         phase: str, is_spot: bool = False):
+        """Watch an order using appropriate watcher."""
+        if is_spot:
+            self.spot_ws.watch(order_id, symbol, batch_id, phase)
+            # Start polling as fallback if WS not connected
+            if not self.spot_ws._connected:
+                self.spot_polling.watch(order_id, symbol, batch_id, phase)
+        else:
+            self.futures_ws.watch(order_id, symbol, batch_id, phase)
+            # Start polling as fallback if WS not connected
+            if not self.futures_ws._connected:
+                self.futures_polling.watch(order_id, symbol, batch_id, phase)
+    
+    async def unwatch_order(self, order_id: str):
+        """Stop watching an order from all watchers."""
+        self.spot_ws.unwatch(order_id)
+        self.futures_ws.unwatch(order_id)
+        self.spot_polling.unwatch(order_id)
+        self.futures_polling.unwatch(order_id)
     
     async def _on_order_update(self, update: OrderUpdate):
         """Handle order update and trigger phase transition."""
         order_id = update.order_id
         
-        if order_id not in self.watcher._watching_orders:
-            return
+        # Find which watcher has this order
+        watcher = self.spot_ws if update.is_spot else self.futures_ws
+        if order_id not in watcher._watching_orders:
+            watcher = self.spot_polling if update.is_spot else self.futures_polling
+            if order_id not in watcher._watching_orders:
+                return
         
-        info = self.watcher._watching_orders[order_id]
+        info = watcher._watching_orders[order_id]
         batch_id = info.get('batch_id')
         current_phase = info.get('phase')
         
@@ -498,7 +731,7 @@ class SchedulerOrderWatcher:
                     await self._handle_second_order_filled(session, batch, update.avg_price)
                 
                 # Unwatch after handling
-                await self.watcher.unwatch(order_id)
+                await self.unwatch_order(order_id)
                 
             elif update.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
                 # Handle failure - re-open order
@@ -512,7 +745,7 @@ class SchedulerOrderWatcher:
                     batch.updated_at = datetime.utcnow()
                     await session.commit()
                 
-                await self.watcher.unwatch(order_id)
+                await self.unwatch_order(order_id)
     
     async def _handle_second_order_filled(self, session, batch: BatchExecute, filled_price: float = None):
         """Handle second order filled - transfer to savings and complete."""
@@ -521,7 +754,6 @@ class SchedulerOrderWatcher:
             batch.second_side_filled_price = filled_price
         
         # Calculate actual quantity to transfer
-        asset = batch.position.contract.replace('USDT', '')
         spot_quantity = (batch.batch_value or 1000) / batch.spot_price if batch.spot_price else 0
         
         # Transfer to savings

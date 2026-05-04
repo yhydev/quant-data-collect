@@ -11,7 +11,7 @@ from typing import Optional
 from sqlalchemy import select
 
 from models.database import get_async_session, BatchExecute, PositionExecute
-from events.order_watcher import SchedulerOrderWatcher
+from events.order_watcher import UnifiedOrderWatcher
 from services import create_collector, create_trader
 from plugins.order_sequence import get_plugin
 
@@ -46,7 +46,7 @@ class BatchExecutionService:
         self.collector = create_collector(collector_type)
         self.trader = create_trader(trader_type)
         self.order_plugin = get_plugin(order_plugin_name)
-        self.order_watcher = SchedulerOrderWatcher(self)
+        self.order_watcher = UnifiedOrderWatcher(self)
 
     # ==================== 批次唤醒逻辑 ====================
 
@@ -430,13 +430,14 @@ class BatchExecutionService:
             batch.updated_at = datetime.utcnow()
             await session.commit()
 
-            # Register to OrderWatcher
+            # Register to OrderWatcher (is_spot depends on order sequence)
+            is_spot = (batch.order_sequence != 'futures_first')  # spot_first means first order is spot
             await self.order_watcher.watch_order(
-                batch_id=batch.id,
-                order_id=batch.first_side_order_id,
-                symbol=batch.position.contract,
-                phase=Phase.FIRST_ORDER_WAIT,
-                timeout=batch.timeout
+                batch.id,
+                batch.first_side_order_id,
+                batch.position.contract,
+                Phase.FIRST_ORDER_WAIT,
+                is_spot
             )
 
             logger.info(f"Batch {batch.id}: First order placed - {result.order_id}")
@@ -468,13 +469,14 @@ class BatchExecutionService:
             batch.updated_at = datetime.utcnow()
             await session.commit()
 
-            # Register to OrderWatcher
+            # Register to OrderWatcher (is_spot depends on order sequence)
+            is_spot = (batch.order_sequence == 'futures_first')  # futures_first means second order is spot
             await self.order_watcher.watch_order(
-                batch_id=batch.id,
-                order_id=batch.second_side_order_id,
-                symbol=batch.position.contract,
-                phase=Phase.SECOND_ORDER_WAIT,
-                timeout=batch.timeout
+                batch.id,
+                batch.second_side_order_id,
+                batch.position.contract,
+                Phase.SECOND_ORDER_WAIT,
+                is_spot
             )
 
             logger.info(f"Batch {batch.id}: Second order placed - {result.order_id}")
