@@ -151,7 +151,8 @@ async def open_position(request: OpenPositionRequest):
                     timeout=300,
                     offset='OPEN',
                     execute_status='PENDING',
-                    phase='PENDING'
+                    phase='PENDING',
+                    batch_value=request.batch_position_value
                 )
                 session.add(batch)
             

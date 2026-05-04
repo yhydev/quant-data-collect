@@ -2,6 +2,7 @@
 Batch execution service - 业务逻辑层
 处理所有批次相关的业务逻辑，供events层调用
 """
+import asyncio
 import logging
 from datetime import datetime
 from decimal import Decimal
@@ -9,7 +10,7 @@ from typing import Dict, Optional
 
 from sqlalchemy import select
 
-from models.database import get_session, BatchExecute
+from models.database import get_async_session, BatchExecute
 from events.order_watcher import SchedulerOrderWatcher
 from services import create_collector, create_trader
 from plugins.order_sequence import get_plugin
@@ -51,28 +52,30 @@ class BatchExecutionService:
     
     # ==================== 批次唤醒逻辑 ====================
     
-    def wake_pending_batches(self) -> int:
+    async def wake_pending_batches(self) -> int:
         """
         唤醒PENDING批次
         
         Returns:
             唤醒的批次数量
         """
-        session = get_session()
-        
-        try:
+        async with get_async_session() as session:
+            from sqlalchemy import select
+            
             # Get contracts already running
             contracts_running = set()
-            running = session.query(BatchExecute).filter(
-                BatchExecute.execute_status == 'RUNNING'
-            ).all()
+            result = await session.execute(
+                select(BatchExecute).where(BatchExecute.execute_status == 'RUNNING')
+            )
+            running = list(result.scalars().all())
             for batch in running:
                 contracts_running.add(batch.position.contract)
             
             # Find pending batches to wake
-            pending = session.query(BatchExecute).filter(
-                BatchExecute.execute_status == 'PENDING'
-            ).order_by(BatchExecute.id).all()
+            result = await session.execute(
+                select(BatchExecute).where(BatchExecute.execute_status == 'PENDING').order_by(BatchExecute.id)
+            )
+            pending = list(result.scalars().all())
             
             woken = 0
             for batch in pending:
@@ -85,7 +88,7 @@ class BatchExecutionService:
                 batch.execute_status = 'RUNNING'
                 batch.phase = PhaseState.PENDING
                 batch.updated_at = datetime.utcnow()
-                session.commit()
+                await session.commit()
                 
                 contracts_running.add(contract)
                 woken += 1
@@ -99,13 +102,10 @@ class BatchExecutionService:
                 logger.info(f"Woke {woken} pending batches")
             
             return woken
-        
-        finally:
-            session.close()
     
     # ==================== 批次执行逻辑 ====================
     
-    def execute_batch(self, batch_id: int) -> bool:
+    async def execute_batch(self, batch_id: int) -> bool:
         """
         执行批次
         
@@ -115,12 +115,11 @@ class BatchExecutionService:
         Returns:
             True if executed successfully, False otherwise
         """
-        session = get_session()
-        
-        try:
-            batch = session.query(BatchExecute).filter(
-                BatchExecute.id == batch_id
-            ).first()
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(BatchExecute).where(BatchExecute.id == batch_id)
+            )
+            batch = result.scalar_one_or_none()
             
             if not batch:
                 return False
@@ -134,7 +133,7 @@ class BatchExecutionService:
             if elapsed > batch.timeout:
                 batch.execute_status = 'COMPLETED'
                 batch.complete_reason = 'TIMEOUT'
-                session.commit()
+                await session.commit()
                 logger.warning(f"Batch {batch.id} timeout")
                 return False
             
@@ -143,17 +142,14 @@ class BatchExecutionService:
             
             # Execute current phase
             try:
-                self._execute_current_phase(machine)
+                await self._execute_current_phase(machine)
                 return True
             except Exception as e:
                 logger.error(f"Batch execution error: {e}")
                 batch.execute_status = 'COMPLETED'
                 batch.complete_reason = f'ERROR: {str(e)}'
-                session.commit()
+                await session.commit()
                 return False
-        
-        finally:
-            session.close()
     
     def trigger_all_running(self) -> None:
         """
@@ -163,7 +159,9 @@ class BatchExecutionService:
         # 发布事件让event worker处理
         if self._phase_service:
             import asyncio
-            asyncio.create_task(self._async_trigger_all_running())
+            task = asyncio.create_task(self._async_trigger_all_running())
+            # 添加回调来处理异常，避免task被垃圾回收
+            task.add_done_callback(lambda t: t.exception() if t.exception() else None)
     
     async def _async_trigger_all_running(self) -> None:
         """异步触发所有running批次"""
@@ -197,7 +195,7 @@ class BatchExecutionService:
     
     # ==================== 订单事件逻辑 ====================
     
-    def handle_order_filled(self, batch_id: int, filled_price: float = 0) -> None:
+    async def handle_order_filled(self, batch_id: int, filled_price: float = 0) -> None:
         """
         处理订单成交事件
         
@@ -219,10 +217,10 @@ class BatchExecutionService:
         # Determine which order was filled
         state = machine.state
         if state == PhaseState.FIRST_ORDER_WAIT:
-            machine.first_order_filled(filled_price=filled_price)
+            await machine.first_order_filled(filled_price=filled_price)
             machine.proceed_to_second()
         elif state == PhaseState.SECOND_ORDER_WAIT:
-            machine.second_order_filled(filled_price=filled_price)
+            await machine.second_order_filled(filled_price=filled_price)
             logger.info(f"Batch {batch_id} completed")
     
     def handle_order_cancelled(self, batch_id: int) -> None:
@@ -254,7 +252,7 @@ class BatchExecutionService:
     
     # ==================== 批次管理逻辑 ====================
     
-    def retry_batch(self, batch_id: int) -> bool:
+    async def retry_batch(self, batch_id: int) -> bool:
         """
         重试批次
         
@@ -264,12 +262,11 @@ class BatchExecutionService:
         Returns:
             True if retried successfully
         """
-        session = get_session()
-        
-        try:
-            batch = session.query(BatchExecute).filter(
-                BatchExecute.id == batch_id
-            ).first()
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(BatchExecute).where(BatchExecute.id == batch_id)
+            )
+            batch = result.scalar_one_or_none()
             
             if not batch:
                 return False
@@ -277,16 +274,13 @@ class BatchExecutionService:
             batch.execute_status = 'RUNNING'
             batch.phase = PhaseState.PENDING
             batch.updated_at = datetime.utcnow()
-            session.commit()
+            await session.commit()
             
             # Create new machine
             self._get_or_create_machine(batch)
             return True
-        
-        finally:
-            session.close()
     
-    def cancel_batch(self, batch_id: int) -> bool:
+    async def cancel_batch(self, batch_id: int) -> bool:
         """
         取消批次
         
@@ -296,30 +290,26 @@ class BatchExecutionService:
         Returns:
             True if cancelled successfully
         """
-        session = get_session()
-        
-        try:
-            batch = session.query(BatchExecute).filter(
-                BatchExecute.id == batch_id
-            ).first()
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(BatchExecute).where(BatchExecute.id == batch_id)
+            )
+            batch = result.scalar_one_or_none()
             
             if not batch:
                 return False
             
             batch.execute_status = 'COMPLETED'
             batch.complete_reason = 'CANCELLED'
-            session.commit()
+            await session.commit()
             
             # Remove machine
             if batch_id in self._machines:
                 del self._machines[batch_id]
             
             return True
-        
-        finally:
-            session.close()
     
-    def timeout_batch(self, batch_id: int) -> bool:
+    async def timeout_batch(self, batch_id: int) -> bool:
         """
         批次超时处理
         
@@ -329,17 +319,16 @@ class BatchExecutionService:
         Returns:
             True if timed out successfully
         """
-        session = get_session()
-        
-        try:
-            batch = session.query(BatchExecute).filter(
-                BatchExecute.id == batch_id
-            ).first()
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(BatchExecute).where(BatchExecute.id == batch_id)
+            )
+            batch = result.scalar_one_or_none()
             
             if batch and batch.execute_status == 'RUNNING':
                 batch.execute_status = 'COMPLETED'
                 batch.complete_reason = 'TIMEOUT'
-                session.commit()
+                await session.commit()
                 
                 # Remove machine
                 if batch_id in self._machines:
@@ -349,9 +338,6 @@ class BatchExecutionService:
                 return True
             
             return False
-        
-        finally:
-            session.close()
     
     # ==================== 状态机管理 ====================
     
@@ -380,7 +366,7 @@ class BatchExecutionService:
         self._machines[batch_id] = machine
         return machine
     
-    def _execute_current_phase(self, machine):
+    async def _execute_current_phase(self, machine):
         """Execute current phase of the state machine."""
         global PhaseState
         
@@ -392,16 +378,16 @@ class BatchExecutionService:
         
         # Trigger appropriate transition based on current state
         if state == PhaseState.PENDING:
-            machine.initialize_params()
+            await machine.initialize_params()
         elif state == PhaseState.FIRST_ORDER_OPEN:
-            machine.open_first_order()
+            await machine.open_first_order()
         elif state == PhaseState.FIRST_ORDER_WAIT:
             # Already watching, just wait
             pass
         elif state == PhaseState.FIRST_FILLED:
             machine.proceed_to_second()
         elif state == PhaseState.SECOND_ORDER_OPEN:
-            machine.open_second_order()
+            await machine.open_second_order()
         elif state == PhaseState.SECOND_ORDER_WAIT:
             # Already watching, just wait
             pass

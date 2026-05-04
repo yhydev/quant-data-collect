@@ -257,8 +257,13 @@ class BinanceTrader(ITrader):
         except Exception as e:
             return TradeResult(success=False, message=str(e))
     
-    async def transfer_to_savings(self, symbol: str, amount: float) -> TradeResult:
-        """Transfer spot to savings."""
+    async def transfer_to_savings(self, symbol: str, quantity: float) -> TradeResult:
+        """Transfer spot to savings.
+        
+        Args:
+            symbol: Trading symbol (e.g., BTCUSDT)
+            quantity: Asset quantity to transfer (e.g., 0.01 BTC)
+        """
         try:
             session = await self._get_session()
             
@@ -266,7 +271,7 @@ class BinanceTrader(ITrader):
             
             params = {
                 'asset': asset,
-                'amount': str(amount),
+                'amount': str(quantity),
                 'type': '1',  # 1 = main to savings
                 'timestamp': int(time.time() * 1000)
             }
@@ -313,8 +318,14 @@ class BinanceTrader(ITrader):
         except Exception as e:
             return TradeResult(success=False, message=str(e))
     
-    async def get_order_status(self, symbol: str, order_id: int) -> dict:
-        """Get order status."""
+    async def get_order_status(self, symbol: str, order_id: int, is_spot: bool = False) -> dict:
+        """Get order status.
+        
+        Args:
+            symbol: Trading symbol
+            order_id: Order ID
+            is_spot: True if spot order, False if futures order
+        """
         try:
             session = await self._get_session()
             
@@ -325,8 +336,10 @@ class BinanceTrader(ITrader):
             }
             params['signature'] = self._sign(params)
             
+            url = f"{self.base_url}/v3/order" if is_spot else f"{self.futures_url}/v1/order"
+            
             async with session.get(
-                f"{self.futures_url}/v1/order",
+                url,
                 params=params,
                 headers=self._headers()
             ) as resp:

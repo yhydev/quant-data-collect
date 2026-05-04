@@ -211,11 +211,14 @@ class OrderWatcher:
         if not self._ws or not self._watching_orders:
             return
         
-        # Subscribe to execution report for each symbol
+        # Note: For spot orders, Binance requires user data stream (listenKey)
+        # For futures, we can use <symbol>@executionReport
+        # This is a simplified version - production should handle both
         symbols = set()
         for info in self._watching_orders.values():
             symbol = info['symbol'].lower()
-            # Binance format: <symbol>@executionReport
+            # For now, only subscribe to futures execution reports
+            # Spot orders should use user data stream with listenKey
             symbols.add(f"{symbol}@executionReport")
         
         if symbols:
@@ -312,6 +315,12 @@ class OrderWatcher:
         intervals = self.config.polling_intervals
         start_time = time.time()
         
+        # Determine if this is a spot order based on watch info
+        is_spot = False
+        if order_id in self._watching_orders:
+            info = self._watching_orders[order_id]
+            is_spot = info.get('is_spot', False)
+        
         for interval in intervals:
             if not self._running or order_id not in self._watching_orders:
                 return
@@ -327,7 +336,7 @@ class OrderWatcher:
             
             # Check order status
             try:
-                status_data = await self.trader.get_order_status(symbol, int(order_id))
+                status_data = await self.trader.get_order_status(symbol, int(order_id), is_spot)
                 status = status_data.get('status', 'UNKNOWN')
                 
                 if status == 'FILLED':
@@ -371,7 +380,7 @@ class OrderWatcher:
             
             # Check one more time
             try:
-                status_data = await self.trader.get_order_status(symbol, int(order_id))
+                status_data = await self.trader.get_order_status(symbol, int(order_id), is_spot)
                 if status_data.get('status') == 'FILLED':
                     update = OrderUpdate(
                         order_id=order_id,
@@ -431,7 +440,7 @@ class SchedulerOrderWatcher:
         await self.watcher.stop()
     
     async def watch_order(self, batch_id: int, order_id: str, symbol: str, 
-                       phase: str, timeout: int = 300):
+                       phase: str, timeout: int = 300, is_spot: bool = False):
         """
         Watch an order and trigger phase transition on fill.
         
@@ -441,12 +450,14 @@ class SchedulerOrderWatcher:
             symbol: Trading symbol
             phase: Current phase (e.g., 'FIRST_ORDER_WAIT')
             timeout: Watch timeout in seconds
+            is_spot: True if this is a spot order
         """
         await self.watcher.watch(order_id, symbol, timeout)
         
         # Store phase mapping for callback
         self.watcher._watching_orders[order_id]['batch_id'] = batch_id
         self.watcher._watching_orders[order_id]['phase'] = phase
+        self.watcher._watching_orders[order_id]['is_spot'] = is_spot
     
     async def _on_order_update(self, update: OrderUpdate):
         """Handle order update and trigger phase transition."""
@@ -484,7 +495,7 @@ class SchedulerOrderWatcher:
                     
                 elif current_phase == 'SECOND_ORDER_WAIT':
                     # Handle second order filled → transfer to savings
-                    await self._handle_second_order_filled(batch, update.avg_price)
+                    await self._handle_second_order_filled(session, batch, update.avg_price)
                 
                 # Unwatch after handling
                 await self.watcher.unwatch(order_id)
@@ -503,33 +514,27 @@ class SchedulerOrderWatcher:
                 
                 await self.watcher.unwatch(order_id)
     
-    async def _handle_second_order_filled(self, batch: BatchExecute, filled_price: float = None):
+    async def _handle_second_order_filled(self, session, batch: BatchExecute, filled_price: float = None):
         """Handle second order filled - transfer to savings and complete."""
-        async with get_async_session() as session:
-            from sqlalchemy import select
-            result = await session.execute(
-                select(BatchExecute).where(BatchExecute.id == batch.id)
-            )
-            batch = result.scalar_one_or_none()
-            
-            if not batch:
-                return
-            
-            # Update filled price
-            if filled_price:
-                batch.second_side_filled_price = filled_price
-            
-            # Transfer to savings
-            transfer_result = await self.scheduler.trader.transfer_to_savings(
-                batch.position.contract,
-                batch.batch_value or 1000
-            )
-            
-            batch.execute_status = 'COMPLETED'
-            batch.complete_reason = 'SUCCESS'
-            batch.phase = 'COMPLETED'
-            batch.updated_at = datetime.utcnow()
-            await session.commit()
-            
-            # Check position complete
-            await self.scheduler._check_position_complete(batch.position_execute_id)
+        # Update filled price
+        if filled_price:
+            batch.second_side_filled_price = filled_price
+        
+        # Calculate actual quantity to transfer
+        asset = batch.position.contract.replace('USDT', '')
+        spot_quantity = (batch.batch_value or 1000) / batch.spot_price if batch.spot_price else 0
+        
+        # Transfer to savings
+        transfer_result = await self.scheduler.trader.transfer_to_savings(
+            batch.position.contract,
+            round(spot_quantity, 6)
+        )
+        
+        batch.execute_status = 'COMPLETED'
+        batch.complete_reason = 'SUCCESS'
+        batch.phase = 'COMPLETED'
+        batch.updated_at = datetime.utcnow()
+        await session.commit()
+        
+        # Check position complete
+        await self.scheduler._check_position_complete(batch.position_execute_id)

@@ -240,39 +240,35 @@ class BatchPhaseMachine:
         
         return machine
     
-    def save_to_batch(self):
+    async def save_to_batch(self):
         """Save current state to batch record."""
         if not self._batch:
             return
         
-        async def _do_save():
-            async with get_async_session() as session:
-                result = await session.execute(
-                    select(BatchExecute).where(BatchExecute.id == self._batch.id)
-                )
-                batch = result.scalar_one_or_none()
-                
-                if not batch:
-                    return
-                
-                # Save state
-                batch.phase = self.state
-                
-                # Save context
-                if self._context:
-                    batch.contract_price = self._context.contract_price
-                    batch.spot_price = self._context.spot_price
-                    batch.first_side_order_id = self._context.first_side_order_id
-                    batch.first_side_filled_price = self._context.first_side_filled_price
-                    batch.second_side_order_id = self._context.second_side_order_id
-                    batch.second_side_filled_price = self._context.second_side_filled_price
-                    batch.order_sequence = self._context.order_sequence
-                
-                batch.updated_at = datetime.utcnow()
-                await session.commit()
-        
-        # Run async save
-        asyncio.get_event_loop().run_until_complete(_do_save())
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(BatchExecute).where(BatchExecute.id == self._batch.id)
+            )
+            batch = result.scalar_one_or_none()
+            
+            if not batch:
+                return
+            
+            # Save state
+            batch.phase = self.state
+            
+            # Save context
+            if self._context:
+                batch.contract_price = self._context.contract_price
+                batch.spot_price = self._context.spot_price
+                batch.first_side_order_id = self._context.first_side_order_id
+                batch.first_side_filled_price = self._context.first_side_filled_price
+                batch.second_side_order_id = self._context.second_side_order_id
+                batch.second_side_filled_price = self._context.second_side_filled_price
+                batch.order_sequence = self._context.order_sequence
+            
+            batch.updated_at = datetime.utcnow()
+            await session.commit()
     
     # ==================== Conditions ====================
     
@@ -334,8 +330,6 @@ class BatchPhaseMachine:
         if not self._context:
             return
         
-        session = get_session()
-        
         # Get order sequence
         order_seq = self.order_plugin.get_order_sequence()
         contract = self._context.contract
@@ -361,7 +355,7 @@ class BatchPhaseMachine:
                    f"order={order_seq.value}, contract={contract_price}, spot={spot_price_val}")
         
         # Save to DB
-        self.save_to_batch()
+        await self.save_to_batch()
     
     async def _on_first_order_open(self, event):
         """Enter FIRST_ORDER_OPEN state."""
@@ -372,7 +366,6 @@ class BatchPhaseMachine:
         if not self._context:
             return
         
-        session = get_session()
         amount = self._context.batch_value
         
         if self._context.order_sequence == 'futures_first':
@@ -395,7 +388,7 @@ class BatchPhaseMachine:
             logger.error(f"Batch {self._context.batch_id}: First order failed - {result.message}")
             raise PhaseStateMachineError(f"Order failed: {result.message}")
         
-        self.save_to_batch()
+        await self.save_to_batch()
     
     async def _on_first_order_wait(self, event):
         """Enter FIRST_ORDER_WAIT state - register to OrderWatcher."""
@@ -419,7 +412,7 @@ class BatchPhaseMachine:
         if filled_price:
             self._context.first_side_filled_price = filled_price
         
-        self.save_to_batch()
+        await self.save_to_batch()
         
         logger.info(f"Batch {self._context.batch_id}: First order filled - price={filled_price}")
     
@@ -443,7 +436,6 @@ class BatchPhaseMachine:
         if not self._context:
             return
         
-        session = get_session()
         amount = self._context.batch_value
         
         # Second order is opposite of first
@@ -467,7 +459,7 @@ class BatchPhaseMachine:
             logger.error(f"Batch {self._context.batch_id}: Second order failed - {result.message}")
             raise PhaseStateMachineError(f"Order failed: {result.message}")
         
-        self.save_to_batch()
+        await self.save_to_batch()
     
     async def _on_second_order_wait(self, event):
         """Enter SECOND_ORDER_WAIT state - register to OrderWatcher."""
@@ -491,15 +483,23 @@ class BatchPhaseMachine:
         if filled_price:
             self._context.second_side_filled_price = filled_price
         
-        # Transfer to savings
+        # Transfer to savings - calculate actual quantity
+        if self._context.order_sequence == 'futures_first':
+            # Second side is spot, transfer spot asset
+            spot_quantity = self._context.batch_value / self._context.spot_price
+        else:
+            # Second side is futures, transfer spot asset  
+            spot_quantity = self._context.batch_value / self._context.spot_price
+        
+        asset = self._context.contract.replace('USDT', '')
         transfer_result = await self.trader.transfer_to_savings(
             self._context.contract,
-            self._context.batch_value
+            round(spot_quantity, 6)
         )
         
         self._context.complete_reason = 'SUCCESS'
         
-        self.save_to_batch()
+        await self.save_to_batch()
         
         logger.info(f"Batch {self._context.batch_id}: Completed - transferred to savings")
         
@@ -541,39 +541,44 @@ class BatchPhaseMachine:
         if not self._context:
             return
         
-        session = get_session()
-        
-        batches = session.query(BatchExecute).filter(
-            BatchExecute.position_execute_id == self._context.position_execute_id
-        ).all()
-        
-        if all(b.phase == PhaseState.COMPLETED for b in batches):
-            pos = session.query(PositionExecute).filter(
-                PositionExecute.id == self._context.position_execute_id
-            ).first()
+        async with get_async_session() as session:
+            from sqlalchemy import select
             
-            if pos:
-                reasons = [b.complete_reason for b in batches]
-                if 'TIMEOUT' in reasons:
-                    overall = 'TIMEOUT'
-                elif any('ERROR' in r for r in reasons if r):
-                    overall = 'ERROR'
-                else:
-                    overall = 'SUCCESS'
+            result = await session.execute(
+                select(BatchExecute).where(
+                    BatchExecute.position_execute_id == self._context.position_execute_id
+                )
+            )
+            batches = list(result.scalars().all())
+            
+            if all(b.phase == PhaseState.COMPLETED for b in batches):
+                result = await session.execute(
+                    select(PositionExecute).where(
+                        PositionExecute.id == self._context.position_execute_id
+                    )
+                )
+                pos = result.scalar_one_or_none()
                 
-                pos.execute_status = 'COMPLETED'
-                pos.complete_reason = overall
-                pos.updated_at = datetime.utcnow()
-                session.commit()
-        
-        session.close()
+                if pos:
+                    reasons = [b.complete_reason for b in batches]
+                    if 'TIMEOUT' in reasons:
+                        overall = 'TIMEOUT'
+                    elif any('ERROR' in r for r in reasons if r):
+                        overall = 'ERROR'
+                    else:
+                        overall = 'SUCCESS'
+                    
+                    pos.execute_status = 'COMPLETED'
+                    pos.complete_reason = overall
+                    pos.updated_at = datetime.utcnow()
+                    await session.commit()
     
     # ==================== Public API ====================
     
     @property
     def state(self) -> str:
         """Get current state."""
-        return self.state
+        return self.machine.state
     
     @property
     def context(self) -> BatchContext:
@@ -644,37 +649,34 @@ class SchedulerPhaseMachine:
             trigger: Trigger name
             **kwargs: Trigger arguments
         """
-        session = get_session()
-        batch = session.query(BatchExecute).filter(
-            BatchExecute.id == batch_id
-        ).first()
-        
-        if not batch:
-            session.close()
-            return
-        
-        # Load machine
-        machine = BatchPhaseMachine.load_from_batch(
-            batch,
-            collector=self.scheduler.collector,
-            trader=self.scheduler.trader,
-            order_plugin=self.scheduler.order_plugin,
-            order_watcher=self.scheduler.order_watcher
-        )
-        
-        # Check if trigger is valid
-        if not machine.can_trigger(trigger):
-            logger.warning(f"Cannot trigger {trigger} from state {machine.state}")
-            session.close()
-            return
-        
-        # Trigger
-        try:
-            machine.trigger(trigger, **kwargs)
-        except Exception as e:
-            logger.error(f"Trigger {trigger} failed: {e}")
-            batch.complete_reason = f'ERROR: {str(e)}'
-            batch.phase = PhaseState.COMPLETED
-            session.commit()
-        
-        session.close()
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(BatchExecute).where(BatchExecute.id == batch_id)
+            )
+            batch = result.scalar_one_or_none()
+            
+            if not batch:
+                return
+            
+            # Load machine
+            machine = BatchPhaseMachine.load_from_batch(
+                batch,
+                collector=self.scheduler.collector,
+                trader=self.scheduler.trader,
+                order_plugin=self.scheduler.order_plugin,
+                order_watcher=self.scheduler.order_watcher
+            )
+            
+            # Check if trigger is valid
+            if not machine.can_trigger(trigger):
+                logger.warning(f"Cannot trigger {trigger} from state {machine.state}")
+                return
+            
+            # Trigger
+            try:
+                machine.trigger(trigger, **kwargs)
+            except Exception as e:
+                logger.error(f"Trigger {trigger} failed: {e}")
+                batch.complete_reason = f'ERROR: {str(e)}'
+                batch.phase = PhaseState.COMPLETED
+                await session.commit()
