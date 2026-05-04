@@ -388,32 +388,24 @@ class BatchExecutionService:
 
     async def _initialize_params(self, batch: BatchExecute, session):
         """Initialize trading parameters (PENDING -> FIRST_ORDER_OPEN)."""
-        # Get order sequence
-        order_seq = self.order_plugin.get_order_sequence()
         contract = batch.position.contract
-
-        # Get prices
-        contract_ticker = await self.collector.get_contract_ticker(contract)
-        spot_price = await self.collector.get_spot_price(contract)
-
-        # Calculate prices with slippage
-        if order_seq.value == 'futures_first':
-            contract_price = float(contract_ticker.mark_price * (1 + float(SLIPPAGE)))
-            spot_price_val = float(spot_price.ask_price)
-        else:
-            spot_price_val = float(spot_price.ask_price * (1 + float(SLIPPAGE)))
-            contract_price = float(contract_ticker.mark_price)
-
+        
+        # Get initial params from plugin (one call for order sequence + prices)
+        params = await self.order_plugin.get_initial_params(
+            self.collector, contract, batch.batch_value
+        )
+        
         # Update batch
-        batch.order_sequence = order_seq.value
-        batch.contract_price = contract_price
-        batch.spot_price = spot_price_val
+        batch.order_sequence = params.order_sequence.value
+        batch.contract_price = params.contract_price
+        batch.spot_price = params.spot_price
         batch.phase = Phase.FIRST_ORDER_OPEN
         batch.updated_at = datetime.utcnow()
         await session.commit()
-
+        
         logger.info(f"Batch {batch.id}: params init - "
-                   f"order={order_seq.value}, contract={contract_price}, spot={spot_price_val}")
+                   f"order={params.order_sequence.value}, "
+                   f"contract={params.contract_price}, spot={params.spot_price}")
 
     async def _open_first_order(self, batch: BatchExecute, session):
         """Open first order (FIRST_ORDER_OPEN -> FIRST_ORDER_WAIT)."""

@@ -140,12 +140,25 @@ class ITrader(ABC):
         pass
 
 
+@dataclass
+class InitialParams:
+    """Initial parameters returned by order plugin."""
+    order_sequence: OrderSequence
+    contract_price: float
+    spot_price: float
+
+
 class IOrderPlugin(ABC):
     """Order sequence plugin interface."""
     
     @abstractmethod
     def get_order_sequence(self) -> OrderSequence:
         """Return order execution sequence."""
+        pass
+    
+    @abstractmethod
+    async def get_initial_params(self, collector, contract: str, batch_value: float) -> InitialParams:
+        """Get initial parameters (order sequence + prices) in one call."""
         pass
 
 
