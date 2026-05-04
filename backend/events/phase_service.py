@@ -229,11 +229,11 @@ class PhaseService:
     
     async def _handle_order_cancelled(self, event: PhaseEvent):
         """Handle ORDER_CANCELLED: 调用service处理订单取消"""
-        self.batch_service.handle_order_cancelled(event.batch_id)
+        await self.batch_service.handle_order_cancelled(event.batch_id)
     
     async def _handle_order_rejected(self, event: PhaseEvent):
         """Handle ORDER_REJECTED: 调用service处理订单拒绝"""
-        self.batch_service.handle_order_rejected(event.batch_id)
+        await self.batch_service.handle_order_rejected(event.batch_id)
     
     async def _handle_batch_retry(self, event: PhaseEvent):
         """Handle BATCH_RETRY: 调用service重试批次"""
@@ -245,18 +245,9 @@ class PhaseService:
     
     # ==================== Delegated Properties ====================
     
-    def get_machine(self, batch_id: int):
-        """Get machine by batch ID."""
-        return self.batch_service.get_machine(batch_id)
-    
-    def get_all_machines(self):
-        """Get all active machines."""
-        return self.batch_service.get_all_machines()
-    
-    @property
-    def active_count(self) -> int:
-        """Number of active state machines."""
-        return self.batch_service.active_count
+    # 不再缓存状态机，以下属性已移除：
+    # get_machine, get_all_machines, active_count
+    # 如需获取状态机，请通过 batch_service._create_machine_for_batch 从数据库重新创建
     
     @property
     def order_watcher(self):

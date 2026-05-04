@@ -43,8 +43,7 @@ class BatchExecutionService:
         self.order_plugin = get_plugin(order_plugin_name)
         self.phase_service = None  # 由main.py注入
         
-        # State machines: batch_id -> machine
-        self._machines: Dict[int, BatchPhaseMachine] = {}
+        # 不再缓存状态机，每次从数据库重新加载
     
     def set_phase_service(self, phase_service):
         """注入PhaseService依赖"""
@@ -93,9 +92,6 @@ class BatchExecutionService:
                 contracts_running.add(contract)
                 woken += 1
                 
-                # Load or create state machine
-                self._get_or_create_machine(batch)
-                
                 logger.info(f"Batch {batch.id} woken: contract={contract}")
             
             if woken > 0:
@@ -137,8 +133,8 @@ class BatchExecutionService:
                 logger.warning(f"Batch {batch.id} timeout")
                 return False
             
-            # Get or create machine
-            machine = self._get_or_create_machine(batch)
+            # Create machine for batch (no caching)
+            machine = self._create_machine_for_batch(batch)
             
             # Execute current phase
             try:
@@ -202,14 +198,22 @@ class BatchExecutionService:
         """
         global PhaseState
         
-        machine = self._machines.get(batch_id)
-        if not machine:
-            logger.warning(f"No machine for batch {batch_id}")
-            return
-        
         # 延迟导入
         if PhaseState is None:
             BatchPhaseMachine, PhaseState = _get_phase_machine_module()
+        
+        # 从数据库重新加载批次并创建状态机
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(BatchExecute).where(BatchExecute.id == batch_id)
+            )
+            batch = result.scalar_one_or_none()
+        
+        if not batch:
+            logger.warning(f"No batch found for batch {batch_id}")
+            return
+        
+        machine = self._create_machine_for_batch(batch)
         
         # Determine which order was filled
         state = machine.state
@@ -227,7 +231,7 @@ class BatchExecutionService:
             await machine._handle_second_order_filled(filled_price)
             logger.info(f"Batch {batch_id} completed")
     
-    def handle_order_cancelled(self, batch_id: int) -> None:
+    async def handle_order_cancelled(self, batch_id: int) -> None:
         """
         处理订单取消事件
         
@@ -236,13 +240,21 @@ class BatchExecutionService:
         """
         global PhaseState
         
-        machine = self._machines.get(batch_id)
-        if not machine:
-            return
-        
         # 延迟导入
         if PhaseState is None:
             BatchPhaseMachine, PhaseState = _get_phase_machine_module()
+        
+        # 从数据库重新加载批次并创建状态机
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(BatchExecute).where(BatchExecute.id == batch_id)
+            )
+            batch = result.scalar_one_or_none()
+        
+        if not batch:
+            return
+        
+        machine = self._create_machine_for_batch(batch)
         
         state = machine.state
         if state == PhaseState.FIRST_ORDER_WAIT:
@@ -250,9 +262,9 @@ class BatchExecutionService:
         elif state == PhaseState.SECOND_ORDER_WAIT:
             machine.proceed_to_second()
     
-    def handle_order_rejected(self, batch_id: int) -> None:
+    async def handle_order_rejected(self, batch_id: int) -> None:
         """处理订单拒绝事件"""
-        self.handle_order_cancelled(batch_id)
+        await self.handle_order_cancelled(batch_id)
     
     # ==================== 批次管理逻辑 ====================
     
@@ -280,8 +292,6 @@ class BatchExecutionService:
             batch.updated_at = datetime.utcnow()
             await session.commit()
             
-            # Create new machine
-            self._get_or_create_machine(batch)
             return True
     
     async def cancel_batch(self, batch_id: int) -> bool:
@@ -307,10 +317,6 @@ class BatchExecutionService:
             batch.complete_reason = 'CANCELLED'
             await session.commit()
             
-            # Remove machine
-            if batch_id in self._machines:
-                del self._machines[batch_id]
-            
             return True
     
     async def timeout_batch(self, batch_id: int) -> bool:
@@ -334,10 +340,6 @@ class BatchExecutionService:
                 batch.complete_reason = 'TIMEOUT'
                 await session.commit()
                 
-                # Remove machine
-                if batch_id in self._machines:
-                    del self._machines[batch_id]
-                
                 logger.info(f"Batch {batch.id} marked as TIMEOUT")
                 return True
             
@@ -345,14 +347,9 @@ class BatchExecutionService:
     
     # ==================== 状态机管理 ====================
     
-    def _get_or_create_machine(self, batch: BatchExecute):
-        """Get or create state machine for batch."""
+    def _create_machine_for_batch(self, batch: BatchExecute):
+        """Create state machine for batch (no caching)."""
         global BatchPhaseMachine, PhaseState
-        
-        batch_id = batch.id
-        
-        if batch_id in self._machines:
-            return self._machines[batch_id]
         
         # 延迟导入
         if BatchPhaseMachine is None:
@@ -367,7 +364,6 @@ class BatchExecutionService:
             order_watcher=self.order_watcher
         )
         
-        self._machines[batch_id] = machine
         return machine
     
     async def _execute_current_phase(self, machine):
@@ -402,15 +398,6 @@ class BatchExecutionService:
         elif state == PhaseState.COMPLETED:
             pass
     
-    def get_machine(self, batch_id: int) -> Optional[BatchPhaseMachine]:
-        """Get machine by batch ID."""
-        return self._machines.get(batch_id)
-    
-    def get_all_machines(self) -> Dict[int, BatchPhaseMachine]:
-        """Get all active machines."""
-        return self._machines.copy()
-    
-    @property
-    def active_count(self) -> int:
-        """Number of active state machines."""
-        return len(self._machines)
+    # 不再缓存状态机，以下方法已移除：
+    # get_machine, get_all_machines, active_count
+    # 如需获取状态机，请使用 _create_machine_for_batch 从数据库重新创建
