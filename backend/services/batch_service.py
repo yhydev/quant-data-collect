@@ -513,3 +513,133 @@ class BatchExecutionService:
                     pos.complete_reason = overall
                     pos.updated_at = datetime.utcnow()
                     await session.commit()
+
+    # ==================== 订单轮询方法（Scheduler Job 调用） ====================
+
+    async def poll_spot_orders(self):
+        """
+        轮询现货订单状态（由 Scheduler Job 调用）
+        查询 DB 中现货的 *_WAIT 订单，获取订单详情，触发业务逻辑
+        """
+        # 1. 查询 DB：所有 RUNNING 且 phase 为 *_WAIT 的批次
+        async with get_async_session() as session:
+            from sqlalchemy import select, or_
+
+            result = await session.execute(
+                select(BatchExecute).where(
+                    BatchExecute.execute_status == 'RUNNING',
+                    or_(
+                        BatchExecute.phase == 'FIRST_ORDER_WAIT',
+                        BatchExecute.phase == 'SECOND_ORDER_WAIT'
+                    )
+                )
+            )
+            waiting_batches = result.scalars().all()
+
+        if not waiting_batches:
+            return
+
+        # 2. 过滤出现货订单（根据 order_sequence 判断）
+        for batch in waiting_batches:
+            is_spot = self._is_spot_order(batch)
+
+            if not is_spot:
+                continue
+
+            await self._poll_single_order(batch, is_spot=True)
+
+    async def poll_futures_orders(self):
+        """
+        轮询合约订单状态（由 Scheduler Job 调用）
+        查询 DB 中合约的 *_WAIT 订单，获取订单详情，触发业务逻辑
+        """
+        # 1. 查询 DB：所有 RUNNING 且 phase 为 *_WAIT 的批次
+        async with get_async_session() as session:
+            from sqlalchemy import select, or_
+
+            result = await session.execute(
+                select(BatchExecute).where(
+                    BatchExecute.execute_status == 'RUNNING',
+                    or_(
+                        BatchExecute.phase == 'FIRST_ORDER_WAIT',
+                        BatchExecute.phase == 'SECOND_ORDER_WAIT'
+                    )
+                )
+            )
+            waiting_batches = result.scalars().all()
+
+        if not waiting_batches:
+            return
+
+        # 2. 过滤出合约订单
+        for batch in waiting_batches:
+            is_spot = self._is_spot_order(batch)
+
+            if is_spot:
+                continue
+
+            await self._poll_single_order(batch, is_spot=False)
+
+    def _is_spot_order(self, batch: BatchExecute) -> bool:
+        """判断当前等待的订单是否为现货订单"""
+        if batch.phase == 'FIRST_ORDER_WAIT':
+            # 第一单是现货，当且仅当 order_sequence 不是 futures_first
+            return batch.order_sequence != 'futures_first'
+        elif batch.phase == 'SECOND_ORDER_WAIT':
+            # 第二单是现货，当且仅当 order_sequence 是 futures_first
+            return batch.order_sequence == 'futures_first'
+        return False
+
+    def _get_order_id(self, batch: BatchExecute) -> str:
+        """获取当前等待阶段的订单ID"""
+        if batch.phase == 'FIRST_ORDER_WAIT':
+            return batch.first_side_order_id
+        elif batch.phase == 'SECOND_ORDER_WAIT':
+            return batch.second_side_order_id
+        return None
+
+    async def _poll_single_order(self, batch: BatchExecute, is_spot: bool):
+        """轮询单个订单，触发业务逻辑"""
+        order_id = self._get_order_id(batch)
+
+        if not order_id:
+            return
+
+        try:
+            status_data = await self.trader.get_order_status(
+                batch.position.contract,
+                int(order_id),
+                is_spot=is_spot
+            )
+
+            status = status_data.get('status', 'UNKNOWN')
+            avg_price = float(status_data.get('avgPrice', 0))
+
+            # 检查是否为终态
+            if status == 'FILLED':
+                update = OrderUpdate(
+                    order_id=order_id,
+                    symbol=batch.position.contract,
+                    status=OrderStatus.FILLED,
+                    avg_price=avg_price,
+                    batch_id=batch.id,
+                    phase=batch.phase,
+                    is_spot=is_spot
+                )
+                logger.info(f"Poll: Batch {batch.id} order {order_id} FILLED")
+                await self.handle_order_update(update)
+
+            elif status in ('CANCELLED', 'EXPIRED', 'REJECTED'):
+                update = OrderUpdate(
+                    order_id=order_id,
+                    symbol=batch.position.contract,
+                    status=OrderStatus(status),
+                    batch_id=batch.id,
+                    phase=batch.phase,
+                    is_spot=is_spot
+                )
+                logger.info(f"Poll: Batch {batch.id} order {order_id} {status}")
+                await self.handle_order_update(update)
+
+        except Exception as e:
+            logger.warning(f"Poll error for batch {batch.id} order {order_id}: {e}")
