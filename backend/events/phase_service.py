@@ -207,25 +207,25 @@ class PhaseService:
     
     async def _handle_batch_wake(self, event: PhaseEvent):
         """Handle BATCH_WAKE: 调用service唤醒批次"""
-        woken = self.batch_service.wake_pending_batches()
+        woken = await self.batch_service.wake_pending_batches()
         if woken > 0:
             logger.info(f"Woke {woken} pending batches")
     
     async def _handle_batch_execute(self, event: PhaseEvent):
         """Handle BATCH_EXECUTE: 调用service执行批次"""
-        success = self.batch_service.execute_batch(event.batch_id)
+        success = await self.batch_service.execute_batch(event.batch_id)
         if not success:
             logger.warning(f"Failed to execute batch {event.batch_id}")
     
     async def _handle_batch_timeout(self, event: PhaseEvent):
         """Handle BATCH_TIMEOUT: 调用service处理超时"""
-        self.batch_service.timeout_batch(event.batch_id)
+        await self.batch_service.timeout_batch(event.batch_id)
     
     async def _handle_order_filled(self, event: PhaseEvent):
         """Handle ORDER_FILLED: 调用service处理订单成交"""
         batch_id = event.batch_id
         filled_price = event.data.get('filled_price', 0)
-        self.batch_service.handle_order_filled(batch_id, filled_price)
+        await self.batch_service.handle_order_filled(batch_id, filled_price)
     
     async def _handle_order_cancelled(self, event: PhaseEvent):
         """Handle ORDER_CANCELLED: 调用service处理订单取消"""
@@ -237,11 +237,11 @@ class PhaseService:
     
     async def _handle_batch_retry(self, event: PhaseEvent):
         """Handle BATCH_RETRY: 调用service重试批次"""
-        self.batch_service.retry_batch(event.batch_id)
+        await self.batch_service.retry_batch(event.batch_id)
     
     async def _handle_batch_cancel(self, event: PhaseEvent):
         """Handle BATCH_CANCEL: 调用service取消批次"""
-        self.batch_service.cancel_batch(event.batch_id)
+        await self.batch_service.cancel_batch(event.batch_id)
     
     # ==================== Delegated Properties ====================
     

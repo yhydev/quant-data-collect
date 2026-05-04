@@ -80,58 +80,53 @@ class BatchPhaseMachine:
     ]
     
     # Define transitions (from -> to)
+    # Note: before callbacks are removed because transitions 0.9.3 doesn't support async callbacks
+    # Async operations are handled manually after trigger calls
     transitions_config = [
         # Phase 1: PENDING -> FIRST_ORDER_OPEN
         {
             'trigger': 'initialize_params',
             'source': PhaseState.PENDING,
             'dest': PhaseState.FIRST_ORDER_OPEN,
-            'conditions': ['_check_can_initialize'],
-            'before': '_before_init_params'
+            'conditions': ['_check_can_initialize']
         },
         # Phase 2: FIRST_ORDER_OPEN -> FIRST_ORDER_WAIT
         {
             'trigger': 'open_first_order',
             'source': PhaseState.FIRST_ORDER_OPEN,
             'dest': PhaseState.FIRST_ORDER_WAIT,
-            'conditions': ['_check_can_open_order'],
-            'before': '_before_open_first_order'
+            'conditions': ['_check_can_open_order']
         },
         # Phase 3: FIRST_ORDER_WAIT -> FIRST_FILLED (triggered by OrderWatcher)
         {
             'trigger': 'first_order_filled',
             'source': PhaseState.FIRST_ORDER_WAIT,
-            'dest': PhaseState.FIRST_FILLED,
-            'before': '_before_first_order_filled'
+            'dest': PhaseState.FIRST_FILLED
         },
         # Phase 3 alt: FIRST_ORDER_WAIT -> FIRST_ORDER_OPEN (retry if cancelled)
         {
             'trigger': 'retry_first_order',
             'source': PhaseState.FIRST_ORDER_WAIT,
-            'dest': PhaseState.FIRST_ORDER_OPEN,
-            'before': '_before_retry_first_order'
+            'dest': PhaseState.FIRST_ORDER_OPEN
         },
         # Phase 4: FIRST_FILLED -> SECOND_ORDER_OPEN
         {
             'trigger': 'proceed_to_second',
             'source': PhaseState.FIRST_FILLED,
-            'dest': PhaseState.SECOND_ORDER_OPEN,
-            'before': '_before_second_order_open'
+            'dest': PhaseState.SECOND_ORDER_OPEN
         },
         # Phase 5: SECOND_ORDER_OPEN -> SECOND_ORDER_WAIT
         {
             'trigger': 'open_second_order',
             'source': PhaseState.SECOND_ORDER_OPEN,
             'dest': PhaseState.SECOND_ORDER_WAIT,
-            'conditions': ['_check_can_open_order'],
-            'before': '_before_open_second_order'
+            'conditions': ['_check_can_open_order']
         },
         # Phase 6: SECOND_ORDER_WAIT -> COMPLETED (triggered by OrderWatcher)
         {
             'trigger': 'second_order_filled',
             'source': PhaseState.SECOND_ORDER_WAIT,
-            'dest': PhaseState.COMPLETED,
-            'before': '_before_complete'
+            'dest': PhaseState.COMPLETED
         },
     ]
     
@@ -282,22 +277,22 @@ class BatchPhaseMachine:
     
     # ==================== Before Callbacks ====================
     
-    def _before_init_params(self, event):
+    async def _before_init_params(self, event):
         """Initialize parameters before transitioning to FIRST_ORDER_OPEN."""
-        self._initialize_params()
+        await self._initialize_params()
     
-    def _before_open_first_order(self, event):
+    async def _before_open_first_order(self, event):
         """Open first order before transitioning to FIRST_ORDER_WAIT."""
-        self._open_first_order()
+        await self._open_first_order()
     
-    def _before_first_order_filled(self, event):
+    async def _before_first_order_filled(self, event):
         """Handle first order filled."""
         # Get filled price from event data
         filled_price = None
         if event and hasattr(event, 'kargs') and event.kargs:
             filled_price = event.kargs.get('filled_price')
         
-        self._handle_first_order_filled(filled_price)
+        await self._handle_first_order_filled(filled_price)
     
     def _before_retry_first_order(self, event):
         """Retry first order."""
@@ -307,17 +302,17 @@ class BatchPhaseMachine:
         """Prepare second order."""
         pass
     
-    def _before_open_second_order(self, event):
+    async def _before_open_second_order(self, event):
         """Open second order before transitioning to SECOND_ORDER_WAIT."""
-        self._open_second_order()
+        await self._open_second_order()
     
-    def _before_complete(self, event):
+    async def _before_complete(self, event):
         """Complete the batch."""
         filled_price = None
         if event and hasattr(event, 'kargs') and event.kargs:
             filled_price = event.kargs.get('filled_price')
         
-        self._handle_second_order_filled(filled_price)
+        await self._handle_second_order_filled(filled_price)
     
     # ==================== Enter Callbacks (Phase Handlers) ====================
     
@@ -420,8 +415,9 @@ class BatchPhaseMachine:
         """Enter FIRST_FILLED state."""
         logger.debug(f"Batch {self._context.batch_id}: Entering FIRST_FILLED")
         
-        # Automatically proceed to second order
-        self.proceed_to_second()
+        # Note: proceed_to_second() is called from batch_service._execute_current_phase
+        # This is just an enter callback for logging purposes
+        pass
     
     async def _exit_first_filled(self, event):
         """Exit FIRST_FILLED state."""

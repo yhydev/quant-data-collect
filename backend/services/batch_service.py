@@ -151,17 +151,14 @@ class BatchExecutionService:
                 await session.commit()
                 return False
     
-    def trigger_all_running(self) -> None:
+    async def trigger_all_running(self) -> None:
         """
         触发所有RUNNING批次的执行
         由scheduler定时调用，只做触发，不查询数据库
         """
         # 发布事件让event worker处理
         if self._phase_service:
-            import asyncio
-            task = asyncio.create_task(self._async_trigger_all_running())
-            # 添加回调来处理异常，避免task被垃圾回收
-            task.add_done_callback(lambda t: t.exception() if t.exception() else None)
+            await self._async_trigger_all_running()
     
     async def _async_trigger_all_running(self) -> None:
         """异步触发所有running批次"""
@@ -217,10 +214,17 @@ class BatchExecutionService:
         # Determine which order was filled
         state = machine.state
         if state == PhaseState.FIRST_ORDER_WAIT:
-            await machine.first_order_filled(filled_price=filled_price)
+            # Trigger state change (synchronous)
+            machine.first_order_filled()
+            # Call async handler manually
+            await machine._handle_first_order_filled(filled_price)
+            # Proceed to second order
             machine.proceed_to_second()
         elif state == PhaseState.SECOND_ORDER_WAIT:
-            await machine.second_order_filled(filled_price=filled_price)
+            # Trigger state change (synchronous)
+            machine.second_order_filled()
+            # Call async handler manually
+            await machine._handle_second_order_filled(filled_price)
             logger.info(f"Batch {batch_id} completed")
     
     def handle_order_cancelled(self, batch_id: int) -> None:
@@ -377,17 +381,21 @@ class BatchExecutionService:
         state = machine.state
         
         # Trigger appropriate transition based on current state
+        # Note: trigger() is synchronous, async operations are called manually after
         if state == PhaseState.PENDING:
-            await machine.initialize_params()
+            machine.initialize_params()  # Trigger state change
+            await machine._initialize_params()  # Call async operation
         elif state == PhaseState.FIRST_ORDER_OPEN:
-            await machine.open_first_order()
+            machine.open_first_order()  # Trigger state change
+            await machine._open_first_order()  # Call async operation
         elif state == PhaseState.FIRST_ORDER_WAIT:
             # Already watching, just wait
             pass
         elif state == PhaseState.FIRST_FILLED:
-            machine.proceed_to_second()
+            machine.proceed_to_second()  # Trigger state change
         elif state == PhaseState.SECOND_ORDER_OPEN:
-            await machine.open_second_order()
+            machine.open_second_order()  # Trigger state change
+            await machine._open_second_order()  # Call async operation
         elif state == PhaseState.SECOND_ORDER_WAIT:
             # Already watching, just wait
             pass
