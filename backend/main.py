@@ -12,25 +12,13 @@ from api.routes import router as api_router
 from models.database import init_db_async
 
 # 导入各层组件
-from scheduler.core import WakeScheduler, ExecuteScheduler
+from scheduler.core import TradingScheduler
 from services.batch_service import BatchExecutionService
 from events.phase_service import PhaseService, PhaseServiceConfig
 
 
-# Configure logging
-def setup_logging():
-    """Setup logging configuration."""
-    log_level = os.getenv('LOG_LEVEL', 'INFO')
-    logging.basicConfig(
-        level=getattr(logging, log_level),
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-
-
 # Global scheduler instances
-wake_scheduler: WakeScheduler | None = None
-execute_scheduler: ExecuteScheduler | None = None
+trading_scheduler: TradingScheduler | None = None
 batch_service: BatchExecutionService | None = None
 phase_service: PhaseService | None = None
 
@@ -69,26 +57,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 3. 注入依赖（service -> events）
     batch_service.set_phase_service(phase_service)
     
-    # 2. 创建events层
-    phase_service = PhaseService(PhaseServiceConfig())
+    # 4. 创建scheduler层（纯触发，一个调度器两个任务）
+    trading_scheduler = TradingScheduler()
     
-    # 3. 创建scheduler层（纯触发）
-    wake_scheduler = WakeScheduler()
-    execute_scheduler = ExecuteScheduler()
+    # 5. 注入依赖到scheduler（通过callback解耦）
+    # Wake callback
+    trading_scheduler.set_wake_callback(lambda: batch_service.wake_pending_batches())
     
-    # 4. 注入依赖到scheduler（通过callback解耦）
-    # WakeScheduler callback (同步函数）
-    wake_scheduler.set_callback(lambda: batch_service.wake_pending_batches())
-    
-    # ExecuteScheduler callback (异步函数需要包装）
+    # Execute callback
     async def execute_callback():
         await batch_service.trigger_all_running()
-    execute_scheduler.set_callback(execute_callback)
+    trading_scheduler.set_execute_callback(execute_callback)
     
-    # 5. 启动各组件
+    # 6. 启动各组件
     await phase_service.start()
-    wake_scheduler.start()
-    execute_scheduler.start()
+    trading_scheduler.start()
     
     logger.info("All services started")
     
@@ -97,10 +80,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Shutdown
     logger.info("Shutting down application...")
     
-    if execute_scheduler:
-        await execute_scheduler.stop()
-    if wake_scheduler:
-        wake_scheduler.stop()
+    if trading_scheduler:
+        trading_scheduler.stop()
     if phase_service:
         await phase_service.stop()
     
