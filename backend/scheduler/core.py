@@ -1,35 +1,32 @@
 """
-Core schedulers refactored:
-- WakeScheduler: 统一唤醒PENDING批次
-- ExecuteScheduler: 基于状态机路由执行RUNNING批次
+Scheduler layer - 只做定时触发，业务逻辑在services层
 """
 import asyncio
-from datetime import datetime
-from decimal import Decimal
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy import select
 
-from services import create_collector, create_trader, PortfolioManager, LockManager
-from plugins.order_sequence import get_plugin
-from models.database import get_async_session, BatchExecute
+from services.batch_service import BatchExecutionService
 from events.phase_service import PhaseService, PhaseServiceConfig
 
 
-SLIPPAGE = Decimal('0.001')
-DEFAULT_ORDER_TIMEOUT = 300
-
-
 class WakeScheduler:
-    """统一唤醒调度器 - 负责将PENDING批次转为RUNNING"""
+    """唤醒调度器 - 定时触发唤醒任务"""
     
     def __init__(self):
         self.scheduler = AsyncIOScheduler()
+        self._batch_service = None
+    
+    def set_batch_service(self, batch_service):
+        """设置BatchExecutionService依赖"""
+        self._batch_service = batch_service
     
     def start(self):
         """启动唤醒调度器"""
+        if self._batch_service is None:
+            raise RuntimeError("BatchService not set. Call set_batch_service() first.")
+        
         self.scheduler.add_job(
-            self._wake_pending_batches,
+            self._trigger_wake,
             trigger=IntervalTrigger(seconds=1),
             id='wake_pending_batches',
             replace_existing=True
@@ -42,88 +39,60 @@ class WakeScheduler:
         self.scheduler.shutdown()
         print("WakeScheduler stopped")
     
-    @staticmethod
-    async def _wake_pending_batches():
-        """唤醒PENDING批次，每个合约只唤醒ID最小的"""
-        async with get_async_session() as session:
-            # 1. 获取已有RUNNING的合约
-            result = await session.execute(
-                select(BatchExecute).where(BatchExecute.execute_status == 'RUNNING')
-            )
-            contracts_running = {batch.position.contract for batch in result.scalars().all()}
-            
-            # 2. 获取所有PENDING批次，按合约分组取最小ID
-            result = await session.execute(
-                select(BatchExecute)
-                .where(BatchExecute.execute_status == 'PENDING')
-                .order_by(BatchExecute.id)
-            )
-            
-            # 每个合约只取第一个（ID最小）
-            contract_min_batch = {}
-            for batch in result.scalars().all():
-                contract = batch.position.contract
-                if contract not in contract_min_batch:
-                    contract_min_batch[contract] = batch
-            
-            # 3. 唤醒不在RUNNING中的合约批次
-            woken = 0
-            for contract, batch in contract_min_batch.items():
-                if contract not in contracts_running:
-                    batch.execute_status = 'RUNNING'
-                    batch.updated_at = datetime.utcnow()
-                    await session.commit()
-                    woken += 1
-            
+    async def _trigger_wake(self):
+        """定时触发唤醒 - 只调用service层"""
+        if self._batch_service:
+            woken = self._batch_service.wake_pending_batches()
             if woken > 0:
                 print(f"Woke {woken} pending batches")
 
 
 class ExecuteScheduler:
-    """执行调度器 - 基于状态机路由执行RUNNING批次"""
+    """执行调度器 - 定时触发批次执行"""
     
-    def __init__(self, collector_type: str = 'binance',
-                 trader_type: str = 'binance',
-                 order_plugin: str = 'futures_first'):
-        self.collector = create_collector(collector_type)
-        self.trader = create_trader(trader_type)
-        self.portfolio = PortfolioManager()
-        self.lock_manager = LockManager()
-        self.order_plugin = get_plugin(order_plugin)
+    def __init__(self, phase_service=None):
+        self.phase_service = phase_service
         self.scheduler = AsyncIOScheduler()
-        
-        # Phase service for state machine routing
-        self.phase_service = PhaseService(PhaseServiceConfig(
-            collector_type=collector_type,
-            trader_type=trader_type,
-            order_plugin=order_plugin
-        ))
+    
+    def set_phase_service(self, phase_service):
+        """设置PhaseService依赖"""
+        self.phase_service = phase_service
     
     def start(self):
         """启动执行调度器"""
+        if self.phase_service is None:
+            raise RuntimeError("PhaseService not set. Call set_phase_service() first.")
+        
         # Start phase service (includes order watcher)
         asyncio.create_task(self.phase_service.start())
         
-        # Job: 执行RUNNING批次
+        # Job: 定时触发执行事件
         self.scheduler.add_job(
-            self._execute_running_batches,
+            self._trigger_execute,
             trigger=IntervalTrigger(seconds=1),
             id='execute_running_batches',
             replace_existing=True
         )
         self.scheduler.start()
-        print("ExecuteScheduler started with PhaseService")
+        print("ExecuteScheduler started")
     
     async def stop(self):
         """停止执行调度器"""
-        await self.phase_service.stop()
+        if self.phase_service:
+            await self.phase_service.stop()
         self.scheduler.shutdown()
         print("ExecuteScheduler stopped")
     
-    async def _execute_running_batches(self):
-        """执行RUNNING批次 - 通过PhaseService基于状态机路由"""
+    async def _trigger_execute(self):
+        """定时触发执行 - 只调用service层"""
+        if not self.phase_service:
+            return
+        
+        # 获取所有RUNNING批次，让service层处理
+        from models.database import get_async_session, BatchExecute
+        from sqlalchemy import select
+        
         async with get_async_session() as session:
-            # 获取所有RUNNING批次
             result = await session.execute(
                 select(BatchExecute)
                 .where(BatchExecute.execute_status == 'RUNNING')
@@ -142,19 +111,8 @@ class ExecuteScheduler:
                 contracts_processed.add(contract)
                 
                 try:
-                    # 检查超时
-                    elapsed = (datetime.utcnow() - batch.updated_at).total_seconds()
-                    if elapsed > batch.timeout:
-                        batch.execute_status = 'COMPLETED'
-                        batch.complete_reason = 'TIMEOUT'
-                        await session.commit()
-                        continue
-                    
-                    # 通过PhaseService发布执行事件（状态机会自动路由）
+                    # 发布执行事件，让service层处理所有逻辑（包括超时检查）
                     await self.phase_service.publish_batch_execute(batch.id)
                     
                 except Exception as e:
-                    print(f"Error executing batch {batch.id}: {e}")
-                    batch.execute_status = 'COMPLETED'
-                    batch.complete_reason = f'ERROR: {str(e)}'
-                    await session.commit()
+                    print(f"Error triggering batch {batch.id}: {e}")

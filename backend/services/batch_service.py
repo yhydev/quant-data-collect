@@ -152,6 +152,71 @@ class BatchExecutionService:
         finally:
             session.close()
     
+    def execute_all_running_batches(self) -> int:
+        """
+        执行所有RUNNING批次
+        
+        Returns:
+            成功执行的批次数量
+        """
+        from models.database import get_async_session
+        from sqlalchemy import select
+        
+        # 使用asyncio获取所有running批次
+        import asyncio
+        if asyncio.get_event_loop().is_running():
+            # 如果在async上下文中，创建task
+            return asyncio.ensure_future(self._async_execute_all_running())
+        else:
+            return asyncio.get_event_loop().run_until_complete(
+                self._async_execute_all_running()
+            )
+    
+    async def _async_execute_all_running(self) -> int:
+        """异步执行所有running批次"""
+        from models.database import get_async_session
+        from sqlalchemy import select
+        
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(BatchExecute)
+                .where(BatchExecute.execute_status == 'RUNNING')
+                .order_by(BatchExecute.id)
+            )
+            running = result.scalars().all()
+            
+            contracts_processed = set()
+            executed = 0
+            
+            for batch in running:
+                contract = batch.position.contract
+                
+                # 同一合约只处理一次
+                if contract in contracts_processed:
+                    continue
+                contracts_processed.add(contract)
+                
+                try:
+                    # 检查超时
+                    elapsed = (datetime.utcnow() - batch.updated_at).total_seconds()
+                    if elapsed > batch.timeout:
+                        batch.execute_status = 'COMPLETED'
+                        batch.complete_reason = 'TIMEOUT'
+                        await session.commit()
+                        continue
+                    
+                    # 执行批次
+                    if self.execute_batch(batch.id):
+                        executed += 1
+                    
+                except Exception as e:
+                    logger.error(f"Error executing batch {batch.id}: {e}")
+                    batch.execute_status = 'COMPLETED'
+                    batch.complete_reason = f'ERROR: {str(e)}'
+                    await session.commit()
+            
+            return executed
+    
     # ==================== 订单事件逻辑 ====================
     
     def handle_order_filled(self, batch_id: int, filled_price: float = 0) -> None:
