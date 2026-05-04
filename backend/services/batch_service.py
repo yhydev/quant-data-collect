@@ -174,44 +174,51 @@ class BatchExecutionService:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    # ==================== 订单事件逻辑 ====================
+    # ==================== 订单事件逻辑（统一入口） ====================
 
-    async def handle_order_filled(self, batch_id: int, filled_price: float = 0) -> None:
+    async def handle_order_update(self, update: 'OrderUpdate'):
         """
-        处理订单成交事件
-
-        Args:
-            batch_id: 批次ID
-            filled_price: 成交价格
+        统一处理订单状态更新（由OrderWatcher回调）
+        所有业务逻辑（phase转换、转币等）都在这里处理
         """
+        order_id = update.order_id
+        batch_id = update.batch_id
+        phase = update.phase
+        is_spot = update.is_spot
+        
+        if not batch_id or not phase:
+            return
+        
         async with get_async_session() as session:
             result = await session.execute(
                 select(BatchExecute).where(BatchExecute.id == batch_id)
             )
             batch = result.scalar_one_or_none()
-
-        if not batch:
-            logger.warning(f"No batch found for batch {batch_id}")
-            return
-
-        phase = batch.phase
-
+            
+            if not batch:
+                return
+            
+            # 处理不同状态
+            if update.status == OrderStatus.FILLED:
+                await self._handle_filled(batch, phase, update.avg_price, is_spot, session)
+            elif update.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
+                await self._handle_cancelled(batch, phase, session)
+    
+    async def _handle_filled(self, batch, phase, filled_price, is_spot, session):
+        """处理订单成交"""
         if phase == Phase.FIRST_ORDER_WAIT:
             # 第一单成交
             batch.first_side_filled_price = filled_price or batch.contract_price
             batch.phase = Phase.FIRST_FILLED
             batch.updated_at = datetime.utcnow()
+            await session.commit()
             
-            async with get_async_session() as session:
-                await session.merge(batch)
-                await session.commit()
-            
-            logger.info(f"Batch {batch_id} first order filled - price={filled_price}")
+            logger.info(f"Batch {batch.id} first order filled - price={filled_price}")
             
             # 如果第一单是现货，立即转币到savings
-            if batch.order_sequence != 'futures_first':  # spot_first，第一单是现货
+            if is_spot:
                 await self._transfer_spot_to_savings(batch)
-            
+                
         elif phase == Phase.SECOND_ORDER_WAIT:
             # 第二单成交 → 完成
             batch.second_side_filled_price = filled_price or batch.spot_price
@@ -219,60 +226,30 @@ class BatchExecutionService:
             batch.complete_reason = 'SUCCESS'
             batch.phase = Phase.COMPLETED
             batch.updated_at = datetime.utcnow()
+            await session.commit()
             
-            async with get_async_session() as session:
-                await session.merge(batch)
-                await session.commit()
-            
-            # 如果第二单是现货（futures_first），转币到savings
-            if batch.order_sequence == 'futures_first':  # futures_first，第二单是现货
+            # 如果第二单是现货，转币到savings
+            if is_spot:
                 await self._transfer_spot_to_savings(batch)
             else:
-                # spot_first，第二单是合约，检查仓位完成
+                # 第二单是合约，检查仓位完成
                 await self._check_position_complete(batch.position_execute_id)
             
-            logger.info(f"Batch {batch_id} completed")
-
-    async def handle_order_cancelled(self, batch_id: int) -> None:
-        """
-        处理订单取消事件
-
-        Args:
-            batch_id: 批次ID
-        """
-        async with get_async_session() as session:
-            result = await session.execute(
-                select(BatchExecute).where(BatchExecute.id == batch_id)
-            )
-            batch = result.scalar_one_or_none()
-
-        if not batch:
-            return
-
-        phase = batch.phase
-
+            logger.info(f"Batch {batch.id} completed")
+    
+    async def _handle_cancelled(self, batch, phase, session):
+        """处理订单取消/拒绝"""
         if phase == Phase.FIRST_ORDER_WAIT:
             # 回到PENDING，下次调度重试
             batch.phase = Phase.PENDING
             batch.updated_at = datetime.utcnow()
-
-            async with get_async_session() as session:
-                await session.merge(batch)
-                await session.commit()
-
+            await session.commit()
         elif phase == Phase.SECOND_ORDER_WAIT:
             # 回到FIRST_FILLED
             batch.phase = Phase.FIRST_FILLED
             batch.updated_at = datetime.utcnow()
-
-            async with get_async_session() as session:
-                await session.merge(batch)
-                await session.commit()
-
-    async def handle_order_rejected(self, batch_id: int) -> None:
-        """处理订单拒绝事件"""
-        await self.handle_order_cancelled(batch_id)
-
+            await session.commit()
+    
     # ==================== 批次管理逻辑 ====================
 
     async def retry_batch(self, batch_id: int) -> bool:
