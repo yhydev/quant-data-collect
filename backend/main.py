@@ -10,7 +10,7 @@ from typing import AsyncGenerator
 
 from .api.routes import router as api_router
 from .database import init_db_async
-from .core import PositionScheduler, CloseScheduler
+from .core import WakeScheduler, ExecuteScheduler
 
 
 # Configure logging
@@ -25,14 +25,14 @@ def setup_logging():
 
 
 # Global scheduler instances
-position_scheduler: PositionScheduler | None = None
-close_scheduler: CloseScheduler | None = None
+wake_scheduler: WakeScheduler | None = None
+execute_scheduler: ExecuteScheduler | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
-    global position_scheduler, close_scheduler
+    global wake_scheduler, execute_scheduler
     
     # Setup logging
     setup_logging()
@@ -48,25 +48,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.warning(f"Database init warning: {e}")
     
-    # Start position scheduler
-    position_scheduler = PositionScheduler()
-    position_scheduler.start()
-    logger.info("Position scheduler started")
+    # Start wake scheduler (统一唤醒)
+    wake_scheduler = WakeScheduler()
+    wake_scheduler.start()
+    logger.info("Wake scheduler started")
     
-    # Start close scheduler
-    close_scheduler = CloseScheduler()
-    close_scheduler.start()
-    logger.info("Close scheduler started")
+    # Start execute scheduler (基于状态机路由)
+    execute_scheduler = ExecuteScheduler()
+    execute_scheduler.start()
+    logger.info("Execute scheduler started with PhaseService")
     
     yield
     
     # Shutdown
     logger.info("Shutting down application...")
     
-    if position_scheduler:
-        await position_scheduler.stop()
-    if close_scheduler:
-        await close_scheduler.stop()
+    if execute_scheduler:
+        await execute_scheduler.stop()
+    if wake_scheduler:
+        wake_scheduler.stop()
     
     logger.info("Application shutdown complete")
 
