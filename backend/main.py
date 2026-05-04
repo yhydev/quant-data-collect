@@ -69,6 +69,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await batch_service.trigger_all_running()
     trading_scheduler.set_execute_callback(execute_callback)
     
+    # Poll spot orders callback
+    async def poll_spot_callback():
+        await batch_service.poll_spot_orders()
+    trading_scheduler.set_poll_spot_callback(poll_spot_callback)
+    
+    # Poll futures orders callback
+    async def poll_futures_callback():
+        await batch_service.poll_futures_orders()
+    trading_scheduler.set_poll_futures_callback(poll_futures_callback)
+    
     # 6. 启动各组件
     await phase_service.start()
     await batch_service.order_polling.start()
@@ -85,8 +95,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         trading_scheduler.stop()
     if phase_service:
         await phase_service.stop()
-    if batch_service:
-        await batch_service.order_polling.stop()
     
     logger.info("Application shutdown complete")
 
