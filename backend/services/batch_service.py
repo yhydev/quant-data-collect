@@ -201,13 +201,17 @@ class BatchExecutionService:
             batch.first_side_filled_price = filled_price or batch.contract_price
             batch.phase = Phase.FIRST_FILLED
             batch.updated_at = datetime.utcnow()
-
+            
             async with get_async_session() as session:
                 await session.merge(batch)
                 await session.commit()
-
+            
             logger.info(f"Batch {batch_id} first order filled - price={filled_price}")
-
+            
+            # 如果第一单是现货，立即转币到savings
+            if batch.order_sequence != 'futures_first':  # spot_first，第一单是现货
+                await self._transfer_spot_to_savings(batch)
+            
         elif phase == Phase.SECOND_ORDER_WAIT:
             # 第二单成交 → 完成
             batch.second_side_filled_price = filled_price or batch.spot_price
@@ -215,14 +219,18 @@ class BatchExecutionService:
             batch.complete_reason = 'SUCCESS'
             batch.phase = Phase.COMPLETED
             batch.updated_at = datetime.utcnow()
-
+            
             async with get_async_session() as session:
                 await session.merge(batch)
                 await session.commit()
-
-            # 转账到savings并检查仓位完成
-            await self._handle_second_order_filled(batch)
-
+            
+            # 如果第二单是现货（futures_first），转币到savings
+            if batch.order_sequence == 'futures_first':  # futures_first，第二单是现货
+                await self._transfer_spot_to_savings(batch)
+            else:
+                # spot_first，第二单是合约，检查仓位完成
+                await self._check_position_complete(batch.position_execute_id)
+            
             logger.info(f"Batch {batch_id} completed")
 
     async def handle_order_cancelled(self, batch_id: int) -> None:
@@ -482,18 +490,21 @@ class BatchExecutionService:
             logger.error(f"Batch {batch.id}: Second order failed - {result.message}")
             raise Exception(f"Order failed: {result.message}")
 
-    async def _handle_second_order_filled(self, batch: BatchExecute):
-        """Handle second order filled - transfer to savings and complete."""
+    async def _transfer_spot_to_savings(self, batch: BatchExecute):
+        """Transfer spot asset to savings (called when spot order filled)."""
         # Calculate actual quantity to transfer
         spot_quantity = (batch.batch_value or 1000) / batch.spot_price if batch.spot_price else 0
-
+        asset = batch.position.contract.replace('USDT', '')
+        
         # Transfer to savings
         transfer_result = await self.trader.transfer_to_savings(
             batch.position.contract,
             round(spot_quantity, 6)
         )
-
-        # Check position complete
+        
+        logger.info(f"Batch {batch.id}: transferred {spot_quantity} {asset} to savings")
+        
+        # Check if position complete
         await self._check_position_complete(batch.position_execute_id)
 
     # ==================== 辅助方法 ====================
