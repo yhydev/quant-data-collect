@@ -109,8 +109,7 @@ class RuleExecuterService:
         batch.order_sequence = params.order_sequence.value
         batch.contract_price = params.contract_price
         batch.spot_price = params.spot_price
-        batch.phase = "FIRST_ORDER_OPEN"
-        batch.updated_at = datetime.utcnow()
+        service.set_batch_phase(batch, "FIRST_ORDER_OPEN", ctx["session"], trigger="RULE_INITIALIZE")
 
         logger.info(
             "Batch %s: params init - order=%s, contract=%s, spot=%s",
@@ -158,8 +157,7 @@ class RuleExecuterService:
             raise Exception(f"Order failed: {result.message}")
 
         batch.first_side_order_id = str(result.order_id)
-        batch.phase = "FIRST_ORDER_WAIT"
-        batch.updated_at = datetime.utcnow()
+        service.set_batch_phase(batch, "FIRST_ORDER_WAIT", ctx["session"], trigger="RULE_OPEN_FIRST_ORDER")
         logger.info("Batch %s: First order placed - %s", batch.id, result.order_id)
 
     async def _open_second_order(self, batch):
@@ -200,14 +198,13 @@ class RuleExecuterService:
             raise Exception(f"Order failed: {result.message}")
 
         batch.second_side_order_id = str(result.order_id)
-        batch.phase = "SECOND_ORDER_WAIT"
-        batch.updated_at = datetime.utcnow()
+        service.set_batch_phase(batch, "SECOND_ORDER_WAIT", ctx["session"], trigger="RULE_OPEN_SECOND_ORDER")
         logger.info("Batch %s: Second order placed - %s", batch.id, result.order_id)
 
     async def _to_second_order_open(self, batch):
-        _ = self._get_ctx(batch)
-        batch.phase = "SECOND_ORDER_OPEN"
-        batch.updated_at = datetime.utcnow()
+        ctx = self._get_ctx(batch)
+        service = ctx["batch_service"]
+        service.set_batch_phase(batch, "SECOND_ORDER_OPEN", ctx["session"], trigger="RULE_TO_SECOND_ORDER")
 
     async def _noop(self, batch):
         _ = batch

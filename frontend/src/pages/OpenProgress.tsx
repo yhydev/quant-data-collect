@@ -12,6 +12,16 @@ interface Batch {
   second_side_order_id?: string;
   second_side_filled_price?: number;
   complete_reason?: string;
+  phase_history?: PhaseHistory[];
+}
+
+interface PhaseHistory {
+  id: number;
+  from_phase?: string | null;
+  to_phase: string;
+  trigger?: string;
+  note?: string;
+  created_at?: string;
 }
 
 interface PositionProgress {
@@ -28,22 +38,30 @@ interface OpenProgressProps {
 
 export default function OpenProgress({ positionId }: OpenProgressProps) {
   const [data, setData] = useState<PositionProgress | null>(null);
+  const [manualPositionId, setManualPositionId] = useState<string>(() => {
+    const raw = localStorage.getItem('openProgressPositionId');
+    return raw || '';
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const queryId = new URLSearchParams(window.location.search).get('id');
+  const resolvedPositionId = positionId ?? (queryId ? Number(queryId) : undefined) ?? (manualPositionId ? Number(manualPositionId) : undefined);
 
   useEffect(() => {
-    if (positionId) {
+    if (resolvedPositionId && Number.isFinite(resolvedPositionId)) {
       fetchProgress();
       const interval = setInterval(fetchProgress, 5000);
       return () => clearInterval(interval);
+    } else {
+      setLoading(false);
     }
-  }, [positionId]);
+  }, [resolvedPositionId]);
 
   const fetchProgress = async () => {
-    if (!positionId) return;
+    if (!resolvedPositionId || !Number.isFinite(resolvedPositionId)) return;
     
     try {
-      const response = await fetch(`/api/open-progress/${positionId}`);
+      const response = await fetch(`/api/open-progress/${resolvedPositionId}`);
       if (!response.ok) throw new Error('Failed to fetch');
       const result = await response.json();
       setData(result);
@@ -78,11 +96,32 @@ export default function OpenProgress({ positionId }: OpenProgressProps) {
     return classes[status] || '';
   };
 
-  if (!positionId) {
+  if (!resolvedPositionId || !Number.isFinite(resolvedPositionId)) {
     return (
       <div className="open-progress">
         <h1>开仓进度</h1>
-        <p className="no-data">请先创建开仓任务</p>
+        <div className="position-picker">
+          <input
+            type="number"
+            min="1"
+            placeholder="输入仓位ID，例如 5"
+            value={manualPositionId}
+            onChange={(e) => setManualPositionId(e.target.value)}
+          />
+          <button
+            className="refresh-btn"
+            type="button"
+            onClick={() => {
+              if (manualPositionId) {
+                localStorage.setItem('openProgressPositionId', manualPositionId);
+                fetchProgress();
+              }
+            }}
+          >
+            查看进度
+          </button>
+        </div>
+        <p className="no-data">未选择仓位，请输入仓位ID后查看</p>
       </div>
     );
   }
@@ -98,7 +137,12 @@ export default function OpenProgress({ positionId }: OpenProgressProps) {
 
   return (
     <div className="open-progress">
-      <h1>开仓进度</h1>
+      <div className="page-header">
+        <h1>开仓进度</h1>
+        <button className="refresh-btn" type="button" onClick={fetchProgress} disabled={loading}>
+          刷新进度
+        </button>
+      </div>
       
       {error && <div className="error">{error}</div>}
       
@@ -173,6 +217,25 @@ export default function OpenProgress({ positionId }: OpenProgressProps) {
                     <span className="stage-name">完成 ({getPhaseLabel(batch.phase)})</span>
                   </div>
                 </div>
+
+                {batch.phase_history && batch.phase_history.length > 0 && (
+                  <div className="phase-history">
+                    <div className="phase-history-title">阶段变更记录</div>
+                    <div className="phase-history-list">
+                      {batch.phase_history.map((item) => (
+                        <div key={item.id} className="phase-history-item">
+                          <span className="phase-transition">
+                            {(item.from_phase || 'INIT')} → {item.to_phase}
+                          </span>
+                          <span className="phase-meta">
+                            {item.trigger || 'SYSTEM'}
+                            {item.created_at ? ` | ${new Date(item.created_at).toLocaleString()}` : ''}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>

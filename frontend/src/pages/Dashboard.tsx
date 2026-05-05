@@ -10,6 +10,36 @@ interface Position {
   created_at: string;
 }
 
+interface Batch {
+  id: number;
+  execute_status: string;
+  phase: string | null;
+  order_sequence: string | null;
+  complete_reason: string | null;
+  phase_history?: PhaseHistory[];
+}
+
+interface PhaseHistory {
+  id: number;
+  from_phase?: string | null;
+  to_phase: string;
+  trigger?: string;
+  created_at?: string;
+}
+
+interface PositionHistory {
+  id: number;
+  contract: string;
+  batch_num: number;
+  execute_status: string;
+  batch_position_value: number;
+  offset: string;
+  complete_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  batches: Batch[];
+}
+
 interface Earning {
   id: number;
   contract: string;
@@ -24,6 +54,7 @@ interface Earning {
 
 export default function Dashboard() {
   const [positions, setPositions] = useState<Position[]>([]);
+  const [positionHistory, setPositionHistory] = useState<PositionHistory[]>([]);
   const [earnings, setEarnings] = useState<Earning[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -40,6 +71,8 @@ export default function Dashboard() {
         fetch('/api/earnings')
       ]);
 
+      const historyRes = await fetch('/api/positions/history?limit=20');
+
       if (positionsRes.ok) {
         const positionsData = await positionsRes.json();
         setPositions(positionsData);
@@ -48,6 +81,11 @@ export default function Dashboard() {
       if (earningsRes.ok) {
         const earningsData = await earningsRes.json();
         setEarnings(earningsData);
+      }
+
+      if (historyRes.ok) {
+        const historyData = await historyRes.json();
+        setPositionHistory(historyData);
       }
     } catch (err) {
       console.error(err);
@@ -71,7 +109,12 @@ export default function Dashboard() {
 
   return (
     <div className="dashboard">
-      <h1>监控面板</h1>
+      <div className="page-header">
+        <h1>监控面板</h1>
+        <button className="refresh-btn" type="button" onClick={fetchData}>
+          刷新
+        </button>
+      </div>
 
       <div className="stats">
         <div className="stat-card">
@@ -119,6 +162,49 @@ export default function Dashboard() {
                 </div>
                 <div className={`position-status status-${pos.execute_status.toLowerCase()}`}>
                   {pos.execute_status}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="section">
+        <h2>历史仓位执行</h2>
+        {positionHistory.length === 0 ? (
+          <div className="no-data">暂无历史记录</div>
+        ) : (
+          <div className="history-list">
+            {positionHistory.map(pos => (
+              <div key={pos.id} className="history-item">
+                <div className="history-head">
+                  <div>
+                    <strong>{pos.contract}</strong> #{pos.id} ({pos.offset})
+                  </div>
+                  <div className={`position-status status-${pos.execute_status.toLowerCase()}`}>
+                    {pos.execute_status}
+                  </div>
+                </div>
+                <div className="history-meta">
+                  {pos.batch_num}批 x {pos.batch_position_value}USDT | 原因: {pos.complete_reason || '-'}
+                </div>
+                <div className="batch-list">
+                  {pos.batches.map(batch => (
+                    <div key={batch.id} className="batch-item">
+                      <div>
+                        Batch #{batch.id} | {batch.execute_status} | {batch.phase || '-'} | {batch.order_sequence || '-'} | {batch.complete_reason || '-'}
+                      </div>
+                      {batch.phase_history && batch.phase_history.length > 0 && (
+                        <div className="batch-history">
+                          {batch.phase_history.map(item => (
+                            <div key={item.id} className="batch-history-item">
+                              {(item.from_phase || 'INIT')} → {item.to_phase} ({item.trigger || 'SYSTEM'})
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
               </div>
             ))}

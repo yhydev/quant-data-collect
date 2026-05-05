@@ -17,7 +17,7 @@ export default function ClosePosition({ onSuccess }: ClosePositionProps) {
   const [positions, setPositions] = useState<Position[]>([]);
   const [selectedPosition, setSelectedPosition] = useState<number | null>(null);
   const [batchNum, setBatchNum] = useState(1);
-  const [batchValue, setBatchValue] = useState(1000);
+  const [batchValue, setBatchValue] = useState(6);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -72,8 +72,13 @@ export default function ClosePosition({ onSuccess }: ClosePositionProps) {
 
   return (
     <div className="close-position">
-      <h1>平仓</h1>
-      <p className="subtitle">卖出持仓 + 平合约 -> 完成套利</p>
+      <div className="page-header">
+        <h1>平仓</h1>
+        <button className="refresh-btn" type="button" onClick={fetchPositions} disabled={loading}>
+          刷新持仓
+        </button>
+      </div>
+      <p className="subtitle">卖出持仓 + 平合约 {'->'} 完成套利</p>
 
       <form onSubmit={handleSubmit}>
         {error && <div className="error">{error}</div>}
@@ -110,8 +115,8 @@ export default function ClosePosition({ onSuccess }: ClosePositionProps) {
           <label>每批金额 (USDT)</label>
           <input
             type="number"
-            min="100"
-            step="100"
+            min="6"
+            step="1"
             value={batchValue}
             onChange={(e) => setBatchValue(Number(e.target.value))}
             required

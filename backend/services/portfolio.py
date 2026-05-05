@@ -77,7 +77,7 @@ class PortfolioManager(IPortfolio):
             return pos.id
     
     async def create_batch_execute(self, position_execute_id: int,
-                                    timeout: int = 300) -> int:
+                                    timeout: int = 3600) -> int:
         """Create batch execute record."""
         async with get_async_session() as session:
             batch = BatchExecute(

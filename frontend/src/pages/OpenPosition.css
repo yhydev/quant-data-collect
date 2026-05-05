@@ -9,6 +9,24 @@
   color: #333;
 }
 
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.page-header h1 {
+  margin: 0;
+}
+
+.refresh-btn {
+  width: auto;
+  padding: 8px 14px;
+  background: #0f6cbd;
+  font-size: 14px;
+}
+
 .subtitle {
   color: #666;
   margin-bottom: 20px;
@@ -46,6 +64,12 @@ form {
   outline: none;
   border-color: #40a9ff;
   box-shadow: 0 0 0 2px rgba(24,144,255,0.2);
+}
+
+.field-hint {
+  margin-top: 6px;
+  color: #888;
+  font-size: 12px;
 }
 
 button {

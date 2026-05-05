@@ -8,6 +8,38 @@
   color: #333;
 }
 
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.page-header h1 {
+  margin: 0;
+}
+
+.refresh-btn {
+  width: auto;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 6px;
+  background: #0f6cbd;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.refresh-btn:hover {
+  background: #115ea3;
+}
+
+.refresh-btn:disabled {
+  background: #9aa7b3;
+  cursor: not-allowed;
+}
+
 .dashboard h2 {
   margin: 0 0 12px 0;
   font-size: 18px;
@@ -98,7 +130,60 @@
 
 .status-pending { background: #f0f0f0; color: #666; }
 .status-running { background: #e6f7ff; color: #1890ff; }
-.status-end { background: #f6ffed; color: #52c41a; }
+.status-completed { background: #f6ffed; color: #52c41a; }
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.history-item {
+  border: 1px solid #eee;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fafafa;
+}
+
+.history-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.history-meta {
+  margin-top: 8px;
+  color: #666;
+  font-size: 14px;
+}
+
+.batch-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.batch-item {
+  background: #fff;
+  border: 1px solid #efefef;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.batch-history {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.batch-history-item {
+  font-size: 12px;
+  color: #475569;
+}
 
 .earnings-table {
   width: 100%;

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import './OpenPosition.css';
 
 interface OpenPositionProps {
@@ -7,11 +7,41 @@ interface OpenPositionProps {
 
 export default function OpenPosition({ onSuccess }: OpenPositionProps) {
   const [contract, setContract] = useState('BTCUSDT');
+  const [contracts, setContracts] = useState<string[]>([]);
+  const [contractsLoading, setContractsLoading] = useState(true);
   const [batchNum, setBatchNum] = useState(1);
-  const [batchValue, setBatchValue] = useState(1000);
+  const [batchValue, setBatchValue] = useState(6);
   const [orderPlugin, setOrderPlugin] = useState('futures_first');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const fetchContracts = async () => {
+    try {
+      setContractsLoading(true);
+      const response = await fetch('/api/contracts');
+      if (!response.ok) throw new Error('Failed to load contracts');
+      const data = await response.json();
+      const list = Array.isArray(data) ? data : [];
+      setContracts(list);
+      if (list.length > 0 && !list.includes(contract)) {
+        setContract(list[0]);
+      }
+    } catch {
+      setContracts([]);
+    } finally {
+      setContractsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchContracts();
+  }, []);
+
+  const contractOptions = useMemo(() => {
+    const set = new Set(contracts);
+    if (contract) set.add(contract.toUpperCase());
+    return Array.from(set);
+  }, [contracts, contract]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -23,7 +53,7 @@ export default function OpenPosition({ onSuccess }: OpenPositionProps) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contract,
+          contract: contract.trim().toUpperCase(),
           batch_num: batchNum,
           batch_position_value: batchValue,
           order_plugin: orderPlugin
@@ -48,23 +78,34 @@ export default function OpenPosition({ onSuccess }: OpenPositionProps) {
 
   return (
     <div className="open-position">
-      <h1>开仓</h1>
-      <p className="subtitle">做空合约 + 买入现货 -> Delta中性套利</p>
+      <div className="page-header">
+        <h1>开仓</h1>
+        <button className="refresh-btn" type="button" onClick={fetchContracts} disabled={contractsLoading || loading}>
+          {contractsLoading ? '刷新中...' : '刷新合约'}
+        </button>
+      </div>
+      <p className="subtitle">做空合约 + 买入现货 {'->'} Delta中性套利</p>
 
       <form onSubmit={handleSubmit}>
         {error && <div className="error">{error}</div>}
 
         <div className="form-group">
           <label>合约</label>
-          <select
+          <input
+            list="contract-options"
             value={contract}
-            onChange={(e) => setContract(e.target.value)}
+            onChange={(e) => setContract(e.target.value.toUpperCase())}
+            placeholder={contractsLoading ? '加载合约中...' : '输入或选择合约，如 BTCUSDT'}
             required
-          >
-            <option value="BTCUSDT">BTCUSDT</option>
-            <option value="ETHUSDT">ETHUSDT</option>
-            <option value="BNBUSDT">BNBUSDT</option>
-          </select>
+          />
+          <datalist id="contract-options">
+            {contractOptions.map((item) => (
+              <option key={item} value={item} />
+            ))}
+          </datalist>
+          {!contractsLoading && contracts.length > 0 && (
+            <div className="field-hint">可选合约：{contracts.length} 个，支持直接输入</div>
+          )}
         </div>
 
         <div className="form-group">
@@ -83,8 +124,8 @@ export default function OpenPosition({ onSuccess }: OpenPositionProps) {
           <label>每批金额 (USDT)</label>
           <input
             type="number"
-            min="100"
-            step="100"
+            min="6"
+            step="1"
             value={batchValue}
             onChange={(e) => setBatchValue(Number(e.target.value))}
             required

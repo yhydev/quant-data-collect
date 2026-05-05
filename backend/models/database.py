@@ -37,7 +37,7 @@ class BatchExecute(Base):
     
     id = Column(Integer, primary_key=True)
     position_execute_id = Column(Integer, ForeignKey('position_execute.id'), nullable=False)
-    timeout = Column(Integer, default=300)        # 成交超时时间(秒)
+    timeout = Column(Integer, default=3600)        # 成交超时时间(秒)
     execute_status = Column(String(20), default='PENDING')  # PENDING | RUNNING | COMPLETED
     offset = Column(String(10), nullable=False)    # OPEN | CLOSE
     order_sequence = Column(String(20))            # 先做哪边: FUTURES_FIRST | SPOT_FIRST
@@ -55,6 +55,27 @@ class BatchExecute(Base):
     
     position = relationship("PositionExecute", back_populates="batches", lazy="joined")
     orders = relationship("PositionOrder", back_populates="batch")
+    phase_history = relationship(
+        "BatchPhaseHistory",
+        back_populates="batch",
+        order_by="BatchPhaseHistory.id",
+        cascade="all, delete-orphan",
+    )
+
+
+class BatchPhaseHistory(Base):
+    """批次阶段变更历史"""
+    __tablename__ = 'batch_phase_history'
+
+    id = Column(Integer, primary_key=True)
+    batch_execute_id = Column(Integer, ForeignKey('batch_execute.id'), nullable=False)
+    from_phase = Column(String(50))
+    to_phase = Column(String(50), nullable=False)
+    trigger = Column(String(50), default='SYSTEM')
+    note = Column(String(255))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    batch = relationship("BatchExecute", back_populates="phase_history")
 
 
 class PositionOrder(Base):
@@ -276,7 +297,7 @@ class DBHelper:
     
     @staticmethod
     async def create_batch_execute(session: AsyncSession, position_execute_id: int,
-                           timeout: int = 300) -> BatchExecute:
+                           timeout: int = 3600) -> BatchExecute:
         """Create batch execute record."""
         batch = BatchExecute(
             position_execute_id=position_execute_id,

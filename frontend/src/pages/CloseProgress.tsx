@@ -22,22 +22,26 @@ interface CloseProgressProps {
 
 export default function CloseProgress({ positionId }: CloseProgressProps) {
   const [data, setData] = useState<PositionProgress | null>(null);
+  const queryId = new URLSearchParams(window.location.search).get('id');
+  const resolvedPositionId = positionId ?? (queryId ? Number(queryId) : undefined);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (positionId) {
+    if (resolvedPositionId && Number.isFinite(resolvedPositionId)) {
       fetchProgress();
       const interval = setInterval(fetchProgress, 5000);
       return () => clearInterval(interval);
+    } else {
+      setLoading(false);
     }
-  }, [positionId]);
+  }, [resolvedPositionId]);
 
   const fetchProgress = async () => {
-    if (!positionId) return;
+    if (!resolvedPositionId || !Number.isFinite(resolvedPositionId)) return;
     
     try {
-      const response = await fetch(`/api/open-progress/${positionId}`);
+      const response = await fetch(`/api/open-progress/${resolvedPositionId}`);
       if (!response.ok) throw new Error('Failed to fetch');
       const result = await response.json();
       setData(result);
@@ -49,7 +53,7 @@ export default function CloseProgress({ positionId }: CloseProgressProps) {
     }
   };
 
-  if (!positionId) {
+  if (!resolvedPositionId || !Number.isFinite(resolvedPositionId)) {
     return (
       <div className="close-progress">
         <h1>平仓进度</h1>
@@ -69,7 +73,12 @@ export default function CloseProgress({ positionId }: CloseProgressProps) {
 
   return (
     <div className="close-progress">
-      <h1>平仓进度</h1>
+      <div className="page-header">
+        <h1>平仓进度</h1>
+        <button className="refresh-btn" type="button" onClick={fetchProgress} disabled={loading}>
+          刷新进度
+        </button>
+      </div>
       
       {error && <div className="error">{error}</div>}
 
