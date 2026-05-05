@@ -84,6 +84,7 @@ class StatusResponse(BaseModel):
     """Status response."""
     status: str
     message: str
+    position_id: int | None = None
 
 
 class HealthResponse(BaseModel):
@@ -152,6 +153,7 @@ async def open_position(request: OpenPositionRequest):
                     offset='OPEN',
                     execute_status='PENDING',
                     phase='PENDING',
+                    order_sequence=request.order_plugin,
                     batch_value=request.batch_position_value
                 )
                 session.add(batch)
@@ -162,7 +164,8 @@ async def open_position(request: OpenPositionRequest):
         
         return StatusResponse(
             status='success',
-            message=f"Position opened: {pos.id}, batches: {request.batch_num}"
+            message=f"Position opened: {pos.id}, batches: {request.batch_num}",
+            position_id=pos.id
         )
     
     except Exception as e:
@@ -291,7 +294,8 @@ async def close_position(request: ClosePositionRequest):
                     timeout=300,
                     offset='CLOSE',
                     execute_status='PENDING',
-                    phase='PENDING'
+                    phase='PENDING',
+                    batch_value=request.batch_position_value
                 )
                 session.add(batch)
             
@@ -301,7 +305,8 @@ async def close_position(request: ClosePositionRequest):
         
         return StatusResponse(
             status='success',
-            message=f"Close position created: {close_pos.id}"
+            message=f"Close position created: {close_pos.id}",
+            position_id=close_pos.id
         )
     
     except Exception as e:

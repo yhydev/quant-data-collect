@@ -34,7 +34,7 @@ def setup_logging() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
-    global wake_scheduler, execute_scheduler, batch_service, phase_service
+    global trading_scheduler, batch_service, phase_service
     
     # Setup logging
     setup_logging()

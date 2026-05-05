@@ -58,14 +58,12 @@ export default function OpenProgress({ positionId }: OpenProgressProps) {
   const getPhaseLabel = (phase: string) => {
     const labels: Record<string, string> = {
       'PENDING': '待执行',
-      'CALCULATED_PRICE': '已计算价格',
-      'SPOT_ORDER_OPEN': '现货挂单中',
-      'SPOT_WAIT_FILLED': '等待现货成交',
-      'SPOT_TRANSFER': '转入理财',
-      'CONTRACT_ORDER_OPEN': '合约挂单中',
-      'CONTRACT_WAIT_FILLED': '等待合约成交',
+      'FIRST_ORDER_OPEN': '第一边挂单中',
+      'FIRST_ORDER_WAIT': '等待第一边成交',
+      'FIRST_FILLED': '第一边已成交',
+      'SECOND_ORDER_OPEN': '第二边挂单中',
+      'SECOND_ORDER_WAIT': '等待第二边成交',
       'COMPLETED': '已完成',
-      'CLOSED': '已平仓'
     };
     return labels[phase] || phase;
   };
@@ -138,7 +136,7 @@ export default function OpenProgress({ positionId }: OpenProgressProps) {
                 
                 <div className="batch-stages">
                   <div className={`stage ${batch.phase !== 'PENDING' ? 'completed' : ''}`}>
-                    <span className="stage-name">计算价格</span>
+                    <span className="stage-name">参数初始化</span>
                     {batch.contract_price && (
                       <span className="stage-price">合约: {batch.contract_price}</span>
                     )}
@@ -157,8 +155,8 @@ export default function OpenProgress({ positionId }: OpenProgressProps) {
                     )}
                   </div>
                   
-                  <div className={`stage ${batch.phase === 'SPOT_TRANSFER' || batch.phase === 'CONTRACT_ORDER_OPEN' ? 'completed' : ''}`}>
-                    <span className="stage-name">转入理财</span>
+                  <div className={`stage ${batch.phase === 'FIRST_FILLED' || !!batch.second_side_order_id || batch.status === 'COMPLETED' ? 'completed' : ''}`}>
+                    <span className="stage-name">第一边成交</span>
                   </div>
                   
                   <div className={`stage ${batch.second_side_order_id ? 'completed' : ''}`}>
@@ -172,7 +170,7 @@ export default function OpenProgress({ positionId }: OpenProgressProps) {
                   </div>
                   
                   <div className={`stage ${batch.status === 'COMPLETED' ? 'completed' : ''}`}>
-                    <span className="stage-name">完成</span>
+                    <span className="stage-name">完成 ({getPhaseLabel(batch.phase)})</span>
                   </div>
                 </div>
               </div>

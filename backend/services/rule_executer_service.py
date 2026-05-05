@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from .rule_executer import RuleExecuter
+from plugins.order_sequence import get_plugin
 
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,19 @@ class RuleExecuterService:
         ctx = self._get_ctx(batch)
         service = ctx["batch_service"]
 
-        params = await service.order_plugin.get_initial_params(
+        plugin = service.order_plugin
+        requested_plugin_name = getattr(batch, "order_sequence", None)
+        if requested_plugin_name:
+            try:
+                plugin = get_plugin(requested_plugin_name)
+            except ValueError:
+                logger.warning(
+                    "Batch %s: unknown plugin %s, fallback to default",
+                    batch.id,
+                    requested_plugin_name,
+                )
+
+        params = await plugin.get_initial_params(
             service.collector,
             batch.position.contract,
             batch.batch_value,
@@ -111,18 +124,34 @@ class RuleExecuterService:
         ctx = self._get_ctx(batch)
         service = ctx["batch_service"]
 
-        if batch.order_sequence == "futures_first":
-            result = await service.trader.open_futures_short(
-                batch.position.contract,
-                batch.batch_value,
-                batch.contract_price,
-            )
+        if getattr(batch, "offset", "OPEN") == "CLOSE":
+            if batch.order_sequence == "futures_first":
+                result = await service.arbitrage_service.close_futures_position(
+                    service.trader,
+                    batch.position.contract,
+                    batch.batch_value,
+                )
+            else:
+                result = await service.arbitrage_service.sell_spot(
+                    service.trader,
+                    batch.position.contract,
+                    batch.batch_value,
+                )
         else:
-            result = await service.trader.buy_spot(
-                batch.position.contract,
-                batch.batch_value,
-                batch.spot_price,
-            )
+            if batch.order_sequence == "futures_first":
+                result = await service.arbitrage_service.open_futures_short(
+                    service.trader,
+                    batch.position.contract,
+                    batch.batch_value,
+                    batch.contract_price,
+                )
+            else:
+                result = await service.arbitrage_service.buy_spot(
+                    service.trader,
+                    batch.position.contract,
+                    batch.batch_value,
+                    batch.spot_price,
+                )
 
         if not result.success:
             logger.error("Batch %s: First order failed - %s", batch.id, result.message)
@@ -137,18 +166,34 @@ class RuleExecuterService:
         ctx = self._get_ctx(batch)
         service = ctx["batch_service"]
 
-        if batch.order_sequence == "futures_first":
-            result = await service.trader.buy_spot(
-                batch.position.contract,
-                batch.batch_value,
-                batch.spot_price,
-            )
+        if getattr(batch, "offset", "OPEN") == "CLOSE":
+            if batch.order_sequence == "futures_first":
+                result = await service.arbitrage_service.sell_spot(
+                    service.trader,
+                    batch.position.contract,
+                    batch.batch_value,
+                )
+            else:
+                result = await service.arbitrage_service.close_futures_position(
+                    service.trader,
+                    batch.position.contract,
+                    batch.batch_value,
+                )
         else:
-            result = await service.trader.open_futures_short(
-                batch.position.contract,
-                batch.batch_value,
-                batch.contract_price,
-            )
+            if batch.order_sequence == "futures_first":
+                result = await service.arbitrage_service.buy_spot(
+                    service.trader,
+                    batch.position.contract,
+                    batch.batch_value,
+                    batch.spot_price,
+                )
+            else:
+                result = await service.arbitrage_service.open_futures_short(
+                    service.trader,
+                    batch.position.contract,
+                    batch.batch_value,
+                    batch.contract_price,
+                )
 
         if not result.success:
             logger.error("Batch %s: Second order failed - %s", batch.id, result.message)

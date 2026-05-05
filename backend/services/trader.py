@@ -6,10 +6,9 @@ import os
 import time
 import asyncio
 from typing import Optional
-from decimal import Decimal
-import aiohttp
-import hashlib
-import hmac
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from binance import AsyncClient
+from binance.exceptions import BinanceAPIException
 from models.interfaces import ITrader, TradeResult
 from settings import settings
 
@@ -21,250 +20,202 @@ class BinanceTrader(ITrader):
                  testnet: bool = False):
         self.api_key = api_key or settings.get('binance.api_key', os.getenv('BINANCE_API_KEY', ''))
         self.api_secret = api_secret or settings.get('binance.secret_key', os.getenv('BINANCE_SECRET_KEY', ''))
-        testnet = bool(settings.get('binance.testnet', testnet))
+        self.testnet = bool(settings.get('binance.testnet', testnet))
         self.proxy = settings.get('binance.auth_http_proxy', '').strip() or None
-        
-        if testnet:
-            self.base_url = "https://testnet.binance.vision/api"
-            self.futures_url = "https://testnet.binance.vision/api"
-        else:
-            self.base_url = "https://api.binance.com/api"
-            self.futures_url = "https://fapi.binance.com/fapi"
-        
-        self.session = None
-    
-    async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create aiohttp session."""
-        if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
-        return self.session
-    
-    def _sign(self, params: dict) -> str:
-        """Sign request params."""
-        query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
-        signature = hmac.new(
-            self.api_secret.encode('utf-8'),
-            query_string.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-        return signature
-    
-    def _headers(self) -> dict:
-        """Get request headers."""
-        return {
-            'X-MBX-APIKEY': self.api_key,
-            'Content-Type': 'application/json'
-        }
+        self.client: Optional[AsyncClient] = None
+
+    async def _get_client(self) -> AsyncClient:
+        """Get or create python-binance async client."""
+        if self.client is None:
+            self.client = await AsyncClient.create(
+                api_key=self.api_key,
+                api_secret=self.api_secret,
+                testnet=self.testnet,
+                https_proxy=self.proxy,
+                session_params={"trust_env": True},
+            )
+        return self.client
+
+    async def _get_lot_step(self, symbol: str, is_spot: bool) -> Decimal:
+        """Get LOT_SIZE stepSize for symbol."""
+        client = await self._get_client()
+        data = await (client.get_exchange_info() if is_spot else client.futures_exchange_info())
+
+        for item in data.get('symbols', []):
+            if item.get('symbol') != symbol:
+                continue
+            for f in item.get('filters', []):
+                if f.get('filterType') == 'LOT_SIZE':
+                    return Decimal(str(f.get('stepSize', '0.000001')))
+            break
+
+        return Decimal('0.000001')
+
+    def _floor_to_step(self, quantity: Decimal, step: Decimal) -> Decimal:
+        """Floor quantity to exchange step size."""
+        if step <= 0:
+            return quantity
+        return (quantity / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+    def _ceil_to_step(self, quantity: Decimal, step: Decimal) -> Decimal:
+        """Ceil quantity to exchange step size."""
+        if step <= 0:
+            return quantity
+        return (quantity / step).to_integral_value(rounding=ROUND_UP) * step
+
+    def _format_quantity(self, quantity: Decimal) -> str:
+        """Format quantity to Binance-friendly string."""
+        return format(quantity.normalize(), 'f')
+
+    def _format_exception_message(self, error: Exception) -> str:
+        """Format exception details for consistent API error output."""
+        if isinstance(error, BinanceAPIException):
+            return (
+                f"BinanceAPIException: http_code={error.status_code}, "
+                f"code={error.code}, message={error.message}"
+            )
+        return str(error)
     
     async def close(self):
         """Close session."""
-        if self.session and not self.session.closed:
-            await self.session.close()
+        if self.client is not None:
+            await self.client.close_connection()
+            self.client = None
     
     async def open_futures_short(self, symbol: str, amount: float, 
-                              price: float) -> TradeResult:
+                               price: float) -> TradeResult:
         """Open futures short position (sell)."""
         try:
-            session = await self._get_session()
+            client = await self._get_client()
             
-            # Calculate quantity
-            quantity = round(amount / price, 4)
+            step = await self._get_lot_step(symbol, is_spot=False)
+            raw_quantity = Decimal(str(amount)) / Decimal(str(price))
+            quantity = self._ceil_to_step(raw_quantity, step)
+            if quantity <= 0:
+                return TradeResult(success=False, message="Quantity too small after step rounding")
             
-            params = {
-                'symbol': symbol,
-                'side': 'SELL',
-                'positionSide': 'SHORT',
-                'type': 'LIMIT',
-                'timeInForce': 'GTC',
-                'quantity': str(quantity),
-                'price': str(price),
-                'timestamp': int(time.time() * 1000)
-            }
-            params['signature'] = self._sign(params)
-            
-            async with session.post(
-                f"{self.futures_url}/v1/order",
-                params=params,
-                headers=self._headers(),
-                proxy=self.proxy,
-            ) as resp:
-                if resp.status in [200, 201]:
-                    data = await resp.json()
-                    return TradeResult(
-                        success=True,
-                        order_id=data.get('orderId'),
-                        message=f"Order placed: {data.get('orderId')}"
-                    )
-                else:
-                    text = await resp.text()
-                    return TradeResult(
-                        success=False,
-                        message=f"Error: {text}"
-                    )
+            data = await client.futures_create_order(
+                symbol=symbol,
+                side='SELL',
+                positionSide='SHORT',
+                type='LIMIT',
+                timeInForce='GTC',
+                quantity=self._format_quantity(quantity),
+                price=str(price),
+            )
+            return TradeResult(
+                success=True,
+                order_id=data.get('orderId'),
+                message=f"Order placed: {data.get('orderId')}"
+            )
         except Exception as e:
-            return TradeResult(success=False, message=str(e))
+            return TradeResult(success=False, message=self._format_exception_message(e))
     
     async def close_futures_position(self, symbol: str, amount: float) -> TradeResult:
-        """Close futures position (buy to cover)."""
+        """Close futures position by position value (buy to cover)."""
         try:
-            session = await self._get_session()
-            
-            # Get current position first
-            params = {
-                'symbol': symbol,
-                'timestamp': int(time.time() * 1000)
-            }
-            params['signature'] = self._sign(params)
-            
-            async with session.get(
-                f"{self.futures_url}/v2/positionRisk",
-                params=params,
-                headers=self._headers(),
-                proxy=self.proxy,
-            ) as resp:
-                if resp.status != 200:
-                    return TradeResult(success=False, message="Failed to get position")
-                
-                data = await resp.json()
-                position = None
-                for p in data:
-                    if p.get('symbol') == symbol and float(p.get('positionAmt', 0)) < 0:
-                        position = p
-                        break
-                
-                if not position:
-                    return TradeResult(success=False, message="No short position found")
-                
-                quantity = abs(float(position.get('positionAmt', 0)))
+            client = await self._get_client()
+            data = await client.futures_position_information(symbol=symbol)
+            position = None
+            for p in data:
+                if p.get('symbol') == symbol and float(p.get('positionAmt', 0)) < 0:
+                    position = p
+                    break
 
-            # Place market order to close
-            params = {
-                'symbol': symbol,
-                'side': 'BUY',
-                'positionSide': 'SHORT',
-                'type': 'MARKET',
-                'quantity': str(quantity),
-                'timestamp': int(time.time() * 1000)
-            }
-            params['signature'] = self._sign(params)
-            
-            async with session.post(
-                f"{self.futures_url}/v1/order",
-                params=params,
-                headers=self._headers(),
-                proxy=self.proxy,
-            ) as resp:
-                if resp.status in [200, 201]:
-                    data = await resp.json()
-                    return TradeResult(
-                        success=True,
-                        order_id=data.get('orderId'),
-                        executed_price=float(data.get('avgPrice', 0)),
-                        message=f"Position closed"
-                    )
-                else:
-                    text = await resp.text()
-                    return TradeResult(success=False, message=f"Error: {text}")
+            if not position:
+                return TradeResult(success=False, message="No short position found")
+
+            position_quantity = abs(Decimal(str(position.get('positionAmt', 0))))
+
+            price_data = await client.futures_symbol_ticker(symbol=symbol)
+            current_price = Decimal(str(price_data.get('price', 0)))
+
+            if current_price <= 0:
+                return TradeResult(success=False, message="Invalid futures price")
+
+            step = await self._get_lot_step(symbol, is_spot=False)
+            target_quantity = self._ceil_to_step(Decimal(str(amount)) / current_price, step)
+            max_closeable = self._floor_to_step(position_quantity, step)
+            quantity = min(max_closeable, target_quantity)
+            if quantity <= 0:
+                return TradeResult(success=False, message="Quantity too small after step rounding")
+
+            order = await client.futures_create_order(
+                symbol=symbol,
+                side='BUY',
+                positionSide='SHORT',
+                type='MARKET',
+                quantity=self._format_quantity(quantity),
+            )
+            return TradeResult(
+                success=True,
+                order_id=order.get('orderId'),
+                executed_price=float(order.get('avgPrice', 0) or 0),
+                message="Position closed"
+            )
         except Exception as e:
-            return TradeResult(success=False, message=str(e))
+            return TradeResult(success=False, message=self._format_exception_message(e))
     
     async def buy_spot(self, symbol: str, amount: float, 
-                  price: float) -> TradeResult:
+                   price: float) -> TradeResult:
         """Buy spot asset."""
         try:
-            session = await self._get_session()
+            client = await self._get_client()
             
-            # Calculate quantity
-            quantity = round(amount / price, 6)
+            step = await self._get_lot_step(symbol, is_spot=True)
+            raw_quantity = Decimal(str(amount)) / Decimal(str(price))
+            quantity = self._ceil_to_step(raw_quantity, step)
+            if quantity <= 0:
+                return TradeResult(success=False, message="Quantity too small after step rounding")
             
-            params = {
-                'symbol': symbol,
-                'side': 'BUY',
-                'type': 'LIMIT',
-                'timeInForce': 'GTC',
-                'quantity': str(quantity),
-                'price': str(price),
-                'timestamp': int(time.time() * 1000)
-            }
-            params['signature'] = self._sign(params)
-            
-            async with session.post(
-                f"{self.base_url}/v3/order",
-                params=params,
-                headers=self._headers(),
-                proxy=self.proxy,
-            ) as resp:
-                if resp.status in [200, 201]:
-                    data = await resp.json()
-                    return TradeResult(
-                        success=True,
-                        order_id=data.get('orderId'),
-                        message=f"Order placed"
-                    )
-                else:
-                    text = await resp.text()
-                    return TradeResult(success=False, message=f"Error: {text}")
+            data = await client.create_order(
+                symbol=symbol,
+                side='BUY',
+                type='LIMIT',
+                timeInForce='GTC',
+                quantity=self._format_quantity(quantity),
+                price=str(price),
+            )
+            return TradeResult(success=True, order_id=data.get('orderId'), message="Order placed")
         except Exception as e:
-            return TradeResult(success=False, message=str(e))
+            return TradeResult(success=False, message=self._format_exception_message(e))
     
     async def sell_spot(self, symbol: str, amount: float) -> TradeResult:
-        """Sell spot asset."""
+        """Sell spot asset by position value."""
         try:
-            session = await self._get_session()
-            
-            # First get balance
-            params = {
-                'timestamp': int(time.time() * 1000)
-            }
-            params['signature'] = self._sign(params)
-            
-            async with session.get(
-                f"{self.base_url}/v3/account",
-                params=params,
-                headers=self._headers(),
-                proxy=self.proxy,
-            ) as resp:
-                if resp.status != 200:
-                    return TradeResult(success=False, message="Failed to get account")
-                
-                data = await resp.json()
-                balance = 0
-                for bal in data.get('balances', []):
-                    if bal.get('asset') == symbol.replace('USDT', ''):
-                        balance = float(bal.get('free', 0))
-                        break
+            client = await self._get_client()
+            data = await client.get_account()
+            balance = Decimal('0')
+            for bal in data.get('balances', []):
+                if bal.get('asset') == symbol.replace('USDT', ''):
+                    balance = Decimal(str(bal.get('free', 0)))
+                    break
             
             if balance <= 0:
                 return TradeResult(success=False, message="No balance to sell")
 
-            # Place market order
-            params = {
-                'symbol': symbol,
-                'side': 'SELL',
-                'type': 'MARKET',
-                'quantity': str(balance),
-                'timestamp': int(time.time() * 1000)
-            }
-            params['signature'] = self._sign(params)
-            
-            async with session.post(
-                f"{self.base_url}/v3/order",
-                params=params,
-                headers=self._headers(),
-                proxy=self.proxy,
-            ) as resp:
-                if resp.status in [200, 201]:
-                    data = await resp.json()
-                    return TradeResult(
-                        success=True,
-                        order_id=data.get('orderId'),
-                        message=f"Sold"
-                    )
-                else:
-                    text = await resp.text()
-                    return TradeResult(success=False, message=f"Error: {text}")
+            price_data = await client.get_symbol_ticker(symbol=symbol)
+            current_price = Decimal(str(price_data.get('price', 0)))
+
+            if current_price <= 0:
+                return TradeResult(success=False, message="Invalid spot price")
+
+            step = await self._get_lot_step(symbol, is_spot=True)
+            target_quantity = self._ceil_to_step(Decimal(str(amount)) / current_price, step)
+            max_sellable = self._floor_to_step(balance, step)
+            quantity = min(max_sellable, target_quantity)
+            if quantity <= 0:
+                return TradeResult(success=False, message="Quantity too small after step rounding")
+
+            data = await client.create_order(
+                symbol=symbol,
+                side='SELL',
+                type='MARKET',
+                quantity=self._format_quantity(quantity),
+            )
+            return TradeResult(success=True, order_id=data.get('orderId'), message="Sold")
         except Exception as e:
-            return TradeResult(success=False, message=str(e))
+            return TradeResult(success=False, message=self._format_exception_message(e))
     
     async def transfer_to_savings(self, symbol: str, quantity: float) -> TradeResult:
         """Transfer spot to savings.
@@ -274,60 +225,30 @@ class BinanceTrader(ITrader):
             quantity: Asset quantity to transfer (e.g., 0.01 BTC)
         """
         try:
-            session = await self._get_session()
-            
+            client = await self._get_client()
             asset = symbol.replace('USDT', '')
-            
-            params = {
-                'asset': asset,
-                'amount': str(quantity),
-                'type': '1',  # 1 = main to savings
-                'timestamp': int(time.time() * 1000)
-            }
-            params['signature'] = self._sign(params)
-            
-            async with session.post(
-                f"{self.base_url}/v3/asset/transfer",
-                params=params,
-                headers=self._headers(),
-                proxy=self.proxy,
-            ) as resp:
-                if resp.status in [200, 201]:
-                    return TradeResult(success=True, message="Transferred to savings")
-                else:
-                    text = await resp.text()
-                    return TradeResult(success=False, message=f"Error: {text}")
+            await client.make_universal_transfer(
+                type='MAIN_C2C',
+                asset=asset,
+                amount=str(quantity),
+            )
+            return TradeResult(success=True, message="Transferred to savings")
         except Exception as e:
-            return TradeResult(success=False, message=str(e))
+            return TradeResult(success=False, message=self._format_exception_message(e))
     
     async def transfer_from_savings(self, symbol: str, amount: float) -> TradeResult:
         """Transfer from savings to spot."""
         try:
-            session = await self._get_session()
-            
+            client = await self._get_client()
             asset = symbol.replace('USDT', '')
-            
-            params = {
-                'asset': asset,
-                'amount': str(amount),
-                'type': '2',  # 2 = savings to main
-                'timestamp': int(time.time() * 1000)
-            }
-            params['signature'] = self._sign(params)
-            
-            async with session.post(
-                f"{self.base_url}/v3/asset/transfer",
-                params=params,
-                headers=self._headers(),
-                proxy=self.proxy,
-            ) as resp:
-                if resp.status in [200, 201]:
-                    return TradeResult(success=True, message="Transferred from savings")
-                else:
-                    text = await resp.text()
-                    return TradeResult(success=False, message=f"Error: {text}")
+            await client.make_universal_transfer(
+                type='C2C_MAIN',
+                asset=asset,
+                amount=str(amount),
+            )
+            return TradeResult(success=True, message="Transferred from savings")
         except Exception as e:
-            return TradeResult(success=False, message=str(e))
+            return TradeResult(success=False, message=self._format_exception_message(e))
     
     async def get_order_status(self, symbol: str, order_id: int, is_spot: bool = False) -> dict:
         """Get order status.
@@ -338,28 +259,12 @@ class BinanceTrader(ITrader):
             is_spot: True if spot order, False if futures order
         """
         try:
-            session = await self._get_session()
-            
-            params = {
-                'symbol': symbol,
-                'orderId': str(order_id),
-                'timestamp': int(time.time() * 1000)
-            }
-            params['signature'] = self._sign(params)
-            
-            url = f"{self.base_url}/v3/order" if is_spot else f"{self.futures_url}/v1/order"
-            
-            async with session.get(
-                url,
-                params=params,
-                headers=self._headers(),
-                proxy=self.proxy,
-            ) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                return {}
+            client = await self._get_client()
+            if is_spot:
+                return await client.get_order(symbol=symbol, orderId=str(order_id))
+            return await client.futures_get_order(symbol=symbol, orderId=str(order_id))
         except Exception as e:
-            return {'status': 'ERROR', 'message': str(e)}
+            return {'status': 'ERROR', 'message': self._format_exception_message(e)}
 
 
 # Mock trader for testing
@@ -410,8 +315,9 @@ class MockTrader(ITrader):
     async def transfer_from_savings(self, symbol: str, amount: float) -> TradeResult:
         return TradeResult(success=True, message="Transferred from savings")
     
-    async def get_order_status(self, symbol: str, order_id: int) -> dict:
+    async def get_order_status(self, symbol: str, order_id: int, is_spot: bool = False) -> dict:
         """Get order status."""
+        _ = is_spot
         if order_id in self.orders:
             order = self.orders[order_id]
             return {

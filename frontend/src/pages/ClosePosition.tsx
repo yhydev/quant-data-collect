@@ -61,7 +61,7 @@ export default function ClosePosition({ onSuccess }: ClosePositionProps) {
 
       const data = await response.json();
       if (onSuccess) {
-        onSuccess(selectedPosition);
+        onSuccess(data.position_id ?? selectedPosition);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error');

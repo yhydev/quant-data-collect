@@ -4,6 +4,8 @@ Defines the order in which trades are executed.
 """
 from models.interfaces import IOrderPlugin, OrderSequence, InitialParams
 
+FUTURES_OPEN_MULTIPLIER = 1.002
+SPOT_OPEN_MULTIPLIER = 0.998
 SLIPPAGE = 0.001  # 0.1%
 
 
@@ -17,10 +19,11 @@ class FuturesFirstPlugin(IOrderPlugin):
         """Get initial params: futures first, spot second."""
         contract_ticker = await collector.get_contract_ticker(contract)
         spot_price_obj = await collector.get_spot_price(contract)
-        
-        # Calculate prices with slippage (futures gets slippage)
-        contract_price = float(contract_ticker.mark_price * (1 + SLIPPAGE))
-        spot_price = float(spot_price_obj.ask_price)
+
+        # Default open pricing:
+        # futures first at +0.2%, then spot at -0.2%
+        contract_price = float(contract_ticker.mark_price * FUTURES_OPEN_MULTIPLIER)
+        spot_price = float(spot_price_obj.ask_price * SPOT_OPEN_MULTIPLIER)
         
         return InitialParams(
             order_sequence=OrderSequence.FUTURES_FIRST,

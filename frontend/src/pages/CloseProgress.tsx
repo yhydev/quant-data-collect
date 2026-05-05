@@ -1,11 +1,27 @@
 import { useState, useEffect } from 'react';
 import './CloseProgress.css';
 
+interface Batch {
+  id: number;
+  status: string;
+  phase: string;
+  complete_reason?: string;
+}
+
+interface PositionProgress {
+  id: number;
+  contract: string;
+  execute_status: string;
+  complete_reason?: string;
+  batches: Batch[];
+}
+
 interface CloseProgressProps {
   positionId?: number;
 }
 
 export default function CloseProgress({ positionId }: CloseProgressProps) {
+  const [data, setData] = useState<PositionProgress | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -23,6 +39,8 @@ export default function CloseProgress({ positionId }: CloseProgressProps) {
     try {
       const response = await fetch(`/api/open-progress/${positionId}`);
       if (!response.ok) throw new Error('Failed to fetch');
+      const result = await response.json();
+      setData(result);
       setError(null);
     } catch (err) {
       setError('Failed to load progress');
@@ -54,15 +72,15 @@ export default function CloseProgress({ positionId }: CloseProgressProps) {
       <h1>平仓进度</h1>
       
       {error && <div className="error">{error}</div>}
-      
-      <div className="info">
-        <p>平仓流程：</p>
-        <ol>
-          <li>卖出现货持仓</li>
-          <li>买入平合约空头</li>
-          <li>完成套利</li>
-        </ol>
-      </div>
+
+      {data && (
+        <div className="info">
+          <p>合约: {data.contract}</p>
+          <p>状态: {data.execute_status}</p>
+          {data.complete_reason && <p>完成原因: {data.complete_reason}</p>}
+          <p>批次进度: {data.batches.filter((b) => b.status === 'COMPLETED').length} / {data.batches.length}</p>
+        </div>
+      )}
     </div>
   );
 }

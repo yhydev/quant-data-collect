@@ -15,6 +15,7 @@ from events.order_watcher import OrderUpdate, OrderStatus
 from services import create_collector, create_trader
 from plugins.order_sequence import get_plugin
 from services.rule_executer_service import RuleExecuterService
+from services.arbitrage_service import ArbitrageService
 
 # Phase constants (replacing PhaseState from state machine)
 class Phase:
@@ -46,6 +47,7 @@ class BatchExecutionService:
         # 创建依赖（也可以由main.py注入）
         self.collector = create_collector(collector_type)
         self.trader = create_trader(trader_type)
+        self.arbitrage_service = ArbitrageService()
         self.order_plugin = get_plugin(order_plugin_name)
         self.phase_service = None
         self.rule_executer_service = RuleExecuterService()
@@ -347,16 +349,16 @@ class BatchExecutionService:
 
     async def _transfer_spot_to_savings(self, batch: BatchExecute):
         """Transfer spot asset to savings (called when spot order filled)."""
-        # Calculate actual quantity to transfer
-        spot_quantity = (batch.batch_value or 1000) / batch.spot_price if batch.spot_price else 0
-        asset = batch.position.contract.replace('USDT', '')
-        
-        # Transfer to savings
-        transfer_result = await self.trader.transfer_to_savings(
+        spot_quantity = (batch.batch_value or 0) / batch.spot_price if batch.spot_price else 0
+        transfer_result = await self.arbitrage_service.transfer_to_savings(
+            self.trader,
             batch.position.contract,
-            round(spot_quantity, 6)
+            round(spot_quantity, 6),
         )
-        
+        if not transfer_result.success:
+            raise Exception(f"Transfer to savings failed: {transfer_result.message}")
+
+        asset = batch.position.contract.replace('USDT', '')
         logger.info(f"Batch {batch.id}: transferred {spot_quantity} {asset} to savings")
         
         # Check if position complete
