@@ -206,6 +206,7 @@ class OpeningFlowTests(unittest.IsolatedAsyncioTestCase):
         service.collector = MagicMock()
         service.order_plugin = MagicMock()
         service.trader = MagicMock()
+        service.trader.cancel_order = AsyncMock(return_value=TradeResult(success=True, order_id=222))
 
         service.order_plugin.get_initial_params = AsyncMock(
             return_value=InitialParams(
@@ -293,6 +294,7 @@ class OpeningFlowTests(unittest.IsolatedAsyncioTestCase):
         service.collector = MagicMock()
         service.order_plugin = MagicMock()
         service.trader = MagicMock()
+        service.trader.cancel_order = AsyncMock(return_value=TradeResult(success=True, order_id=222))
         service.trader.buy_spot = AsyncMock(
             return_value=TradeResult(success=True, order_id=333)
         )

@@ -139,6 +139,11 @@ class ITrader(ABC):
         """Get order status."""
         pass
 
+    @abstractmethod
+    async def cancel_order(self, symbol: str, order_id: int, is_spot: bool = False) -> TradeResult:
+        """Cancel an open order."""
+        pass
+
 
 @dataclass
 class InitialParams:

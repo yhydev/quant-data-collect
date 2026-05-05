@@ -155,6 +155,16 @@ class BatchExecutionService:
             else:
                 elapsed = 0
 
+            if batch.phase == Phase.FIRST_ORDER_WAIT and elapsed > (batch.first_order_wait_timeout or 300):
+                self.set_batch_phase(batch, Phase.PENDING, session, trigger='FIRST_ORDER_WAIT_TIMEOUT')
+                await session.commit()
+                logger.warning(
+                    "Batch %s first order wait timeout (%ss), reset to PENDING",
+                    batch.id,
+                    batch.first_order_wait_timeout or 300,
+                )
+                return False
+
             if elapsed > batch.timeout:
                 batch.execute_status = 'COMPLETED'
                 batch.complete_reason = 'TIMEOUT'
@@ -305,6 +315,8 @@ class BatchExecutionService:
 
             if not batch:
                 return False
+
+            await self._cancel_outstanding_orders(batch)
 
             batch.execute_status = 'RUNNING'
             self.set_batch_phase(batch, Phase.PENDING, session, trigger='RESET_BATCH')
@@ -533,6 +545,35 @@ class BatchExecutionService:
         elif batch.phase == 'SECOND_ORDER_WAIT':
             return batch.second_side_order_id
         return None
+
+    async def _cancel_outstanding_orders(self, batch: BatchExecute) -> None:
+        """Cancel possible stale open orders before batch reset."""
+        symbol = batch.position.contract
+        order_sequence = (batch.order_sequence or '').strip().lower()
+        candidates: list[tuple[str, bool]] = []
+
+        if batch.first_side_order_id:
+            is_spot_first = order_sequence != 'futures_first'
+            candidates.append((batch.first_side_order_id, is_spot_first))
+
+        if batch.second_side_order_id:
+            is_spot_second = order_sequence == 'futures_first'
+            candidates.append((batch.second_side_order_id, is_spot_second))
+
+        for order_id, is_spot in candidates:
+            try:
+                status_data = await self.trader.get_order_status(symbol, int(order_id), is_spot=is_spot)
+                status = str(status_data.get('status', '')).upper()
+                if status in ('FILLED', 'CANCELED', 'CANCELLED', 'REJECTED', 'EXPIRED'):
+                    continue
+
+                result = await self.trader.cancel_order(symbol, int(order_id), is_spot=is_spot)
+                if result.success:
+                    logger.info("Batch %s cancelled stale order %s (is_spot=%s)", batch.id, order_id, is_spot)
+                else:
+                    logger.warning("Batch %s failed cancelling stale order %s: %s", batch.id, order_id, result.message)
+            except Exception as exc:
+                logger.warning("Batch %s cancel stale order %s error: %s", batch.id, order_id, exc)
 
     async def _poll_single_order(self, batch: BatchExecute, order_id: str, is_spot: bool):
         """轮询单个订单，触发业务逻辑"""

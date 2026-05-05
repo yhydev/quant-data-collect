@@ -329,6 +329,18 @@ class BinanceTrader(ITrader):
         except Exception as e:
             return {'status': 'ERROR', 'message': self._format_exception_message(e)}
 
+    async def cancel_order(self, symbol: str, order_id: int, is_spot: bool = False) -> TradeResult:
+        """Cancel an existing order."""
+        try:
+            client = await self._get_client()
+            if is_spot:
+                data = await client.cancel_order(symbol=symbol, orderId=str(order_id))
+            else:
+                data = await client.futures_cancel_order(symbol=symbol, orderId=str(order_id))
+            return TradeResult(success=True, order_id=data.get('orderId'), message="Order cancelled")
+        except Exception as e:
+            return TradeResult(success=False, message=self._format_exception_message(e))
+
 
 # Mock trader for testing
 class MockTrader(ITrader):
@@ -390,6 +402,15 @@ class MockTrader(ITrader):
                 'avgPrice': order.get('price', 0)
             }
         return {'status': 'UNKNOWN', 'symbol': symbol}
+
+    async def cancel_order(self, symbol: str, order_id: int, is_spot: bool = False) -> TradeResult:
+        """Cancel order in mock trader."""
+        _ = symbol
+        _ = is_spot
+        if order_id in self.orders:
+            self.orders[order_id]['status'] = 'CANCELLED'
+            return TradeResult(success=True, order_id=order_id, message="Order cancelled")
+        return TradeResult(success=False, message="Order not found")
 
 
 # Factory function
