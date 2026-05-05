@@ -31,6 +31,9 @@ def setup_logging() -> None:
         level=log_level,
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
     )
+    # Silence APScheduler logs during troubleshooting
+    logging.getLogger("apscheduler").setLevel(logging.CRITICAL)
+    logging.getLogger("apscheduler").propagate = False
 
 
 @asynccontextmanager
@@ -100,6 +103,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.exception("Funding rate sync job failed")
 
     trading_scheduler.set_funding_sync_callback(funding_sync_callback)
+
+    # Position reconcile callback
+    async def position_reconcile_callback():
+        return await batch_service.reconcile_running_positions()
+
+    trading_scheduler.set_position_reconcile_callback(position_reconcile_callback)
     
     # 6. 启动各组件
     await phase_service.start()

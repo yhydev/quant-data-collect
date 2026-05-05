@@ -407,7 +407,7 @@ class BatchExecutionService:
             batches = list(result.scalars().all())
 
             # Check if all completed
-            if all(b.phase == Phase.COMPLETED for b in batches):
+            if batches and all(b.execute_status == 'COMPLETED' for b in batches):
                 result = await session.execute(
                     select(PositionExecute).where(
                         PositionExecute.id == position_execute_id
@@ -428,6 +428,44 @@ class BatchExecutionService:
                     pos.complete_reason = overall
                     pos.updated_at = datetime.utcnow()
                     await session.commit()
+
+    async def reconcile_running_positions(self) -> int:
+        """Finalize RUNNING positions when all related batches are COMPLETED."""
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(PositionExecute).where(PositionExecute.execute_status == 'RUNNING')
+            )
+            running_positions = list(result.scalars().all())
+
+            finalized = 0
+            for pos in running_positions:
+                batches_result = await session.execute(
+                    select(BatchExecute).where(BatchExecute.position_execute_id == pos.id)
+                )
+                batches = list(batches_result.scalars().all())
+                if not batches or any(b.execute_status != 'COMPLETED' for b in batches):
+                    continue
+
+                reasons = [b.complete_reason for b in batches]
+                if 'TIMEOUT' in reasons:
+                    overall = 'TIMEOUT'
+                elif any('ERROR' in r for r in reasons if r):
+                    overall = 'ERROR'
+                elif 'CANCELLED' in reasons:
+                    overall = 'CANCELLED'
+                else:
+                    overall = 'SUCCESS'
+
+                pos.execute_status = 'COMPLETED'
+                pos.complete_reason = overall
+                pos.updated_at = datetime.utcnow()
+                finalized += 1
+
+            if finalized > 0:
+                await session.commit()
+                logger.info("Reconciled %s running positions to COMPLETED", finalized)
+
+            return finalized
 
     # ==================== 订单轮询方法（一个 Scheduler Job 调用） ====================
 
