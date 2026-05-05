@@ -240,33 +240,74 @@ class BinanceTrader(ITrader):
             return TradeResult(success=False, message=self._format_exception_message(e))
     
     async def transfer_to_savings(self, symbol: str, quantity: float) -> TradeResult:
-        """Transfer spot to savings.
-        
-        Args:
-            symbol: Trading symbol (e.g., BTCUSDT)
-            quantity: Asset quantity to transfer (e.g., 0.01 BTC)
-        """
+        """Subscribe asset from spot to Simple Earn flexible."""
         try:
             client = await self._get_client()
             asset = symbol.replace('USDT', '')
-            await client.make_universal_transfer(
-                type='MAIN_C2C',
+            req_qty = Decimal(str(quantity))
+            if req_qty <= 0:
+                return TradeResult(success=False, message="Transfer amount must be positive")
+
+            balance_data = await client.get_asset_balance(asset=asset)
+            free_balance = Decimal(str((balance_data or {}).get('free', '0')))
+            transfer_qty = min(req_qty, free_balance)
+            if transfer_qty <= 0:
+                return TradeResult(success=False, message=f"Insufficient free spot balance for {asset}")
+
+            transfer_qty_str = self._format_quantity(transfer_qty)
+            products = await client.get_simple_earn_flexible_product_list(
                 asset=asset,
-                amount=str(quantity),
+                current=1,
+                size=100,
             )
-            return TradeResult(success=True, message="Transferred to savings")
+            rows = products.get('rows', []) if isinstance(products, dict) else []
+            if not rows:
+                return TradeResult(success=False, message=f"No flexible Simple Earn product for asset {asset}")
+
+            product_id = rows[0].get('productId')
+            if not product_id:
+                return TradeResult(success=False, message=f"Missing productId for asset {asset}")
+
+            await client.subscribe_simple_earn_flexible_product(
+                productId=product_id,
+                amount=transfer_qty_str,
+            )
+            return TradeResult(
+                success=True,
+                message=f"Transferred to savings (requested={req_qty}, actual={transfer_qty_str})",
+            )
         except Exception as e:
             return TradeResult(success=False, message=self._format_exception_message(e))
     
     async def transfer_from_savings(self, symbol: str, amount: float) -> TradeResult:
-        """Transfer from savings to spot."""
+        """Redeem asset from Simple Earn flexible to spot."""
         try:
             client = await self._get_client()
             asset = symbol.replace('USDT', '')
-            await client.make_universal_transfer(
-                type='C2C_MAIN',
+            positions = await client.get_simple_earn_flexible_product_position(
                 asset=asset,
+                current=1,
+                size=100,
+            )
+            rows = positions.get('rows', []) if isinstance(positions, dict) else []
+            product_id = rows[0].get('productId') if rows else None
+            if not product_id:
+                products = await client.get_simple_earn_flexible_product_list(
+                    asset=asset,
+                    current=1,
+                    size=100,
+                )
+                p_rows = products.get('rows', []) if isinstance(products, dict) else []
+                if not p_rows:
+                    return TradeResult(success=False, message=f"No flexible Simple Earn product for asset {asset}")
+                product_id = p_rows[0].get('productId')
+            if not product_id:
+                return TradeResult(success=False, message=f"Missing productId for asset {asset}")
+
+            await client.redeem_simple_earn_flexible_product(
+                productId=product_id,
                 amount=str(amount),
+                redeemAll=False,
             )
             return TradeResult(success=True, message="Transferred from savings")
         except Exception as e:

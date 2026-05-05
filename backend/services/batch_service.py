@@ -497,6 +497,15 @@ class BatchExecutionService:
             is_spot = self._is_spot_order(batch)
             order_id = self._get_order_id(batch)
 
+            logger.info(
+                "Poll: Batch %s phase=%s order_sequence=%s is_spot=%s order_id=%s",
+                batch.id,
+                batch.phase,
+                batch.order_sequence,
+                is_spot,
+                order_id,
+            )
+
             if not order_id:
                 continue
 
@@ -504,12 +513,13 @@ class BatchExecutionService:
 
     def _is_spot_order(self, batch: BatchExecute) -> bool:
         """判断当前等待的订单是否为现货订单"""
+        order_sequence = (batch.order_sequence or '').strip().lower()
         if batch.phase == 'FIRST_ORDER_WAIT':
             # 第一单是现货，当且仅当 order_sequence 不是 futures_first
-            return batch.order_sequence != 'futures_first'
+            return order_sequence != 'futures_first'
         elif batch.phase == 'SECOND_ORDER_WAIT':
             # 第二单是现货，当且仅当 order_sequence 是 futures_first
-            return batch.order_sequence == 'futures_first'
+            return order_sequence == 'futures_first'
         return False
 
     def _is_wait_phase(self, phase: str) -> bool:
