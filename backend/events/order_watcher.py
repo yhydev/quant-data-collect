@@ -25,6 +25,7 @@ class OrderUpdate:
     symbol: str
     status: OrderStatus
     avg_price: float | None = None
+    executed_qty: float | None = None
     batch_id: int | None = None
     phase: str | None = None
     is_spot: bool = False

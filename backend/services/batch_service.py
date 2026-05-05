@@ -10,12 +10,15 @@ from typing import Optional
 
 from sqlalchemy import select
 
-from models.database import get_async_session, BatchExecute, PositionExecute
+from models.database import get_async_session, BatchExecute, PositionExecute, BatchPhaseHistory
 from events.order_watcher import OrderUpdate, OrderStatus
 from services import create_collector, create_trader
 from plugins.order_sequence import get_plugin
 from services.rule_executer_service import RuleExecuterService
 from services.arbitrage_service import ArbitrageService
+
+
+logger = logging.getLogger(__name__)
 
 # Phase constants (replacing PhaseState from state machine)
 class Phase:
@@ -56,6 +59,24 @@ class BatchExecutionService:
         """Set phase service reference for compatibility."""
         self.phase_service = phase_service
 
+    def set_batch_phase(self, batch: BatchExecute, to_phase: str, session, trigger: str = 'SYSTEM', note: str | None = None) -> None:
+        """Set batch phase and persist transition history when changed."""
+        from_phase = batch.phase
+        if from_phase == to_phase:
+            return
+
+        batch.phase = to_phase
+        batch.updated_at = datetime.utcnow()
+        session.add(
+            BatchPhaseHistory(
+                batch_execute_id=batch.id,
+                from_phase=from_phase,
+                to_phase=to_phase,
+                trigger=trigger,
+                note=note,
+            )
+        )
+
     # ==================== 批次唤醒逻辑 ====================
 
     async def wake_pending_batches(self) -> int:
@@ -90,8 +111,7 @@ class BatchExecutionService:
 
                 # Wake batch
                 batch.execute_status = 'RUNNING'
-                batch.phase = Phase.PENDING
-                batch.updated_at = datetime.utcnow()
+                self.set_batch_phase(batch, Phase.PENDING, session, trigger='WAKE_BATCH')
                 await session.commit()
 
                 contracts_running.add(contract)
@@ -212,37 +232,42 @@ class BatchExecutionService:
             
             # 处理不同状态
             if update.status == OrderStatus.FILLED:
-                await self._handle_filled(batch, phase, update.avg_price, is_spot, session)
+                await self._handle_filled(
+                    batch,
+                    phase,
+                    update.avg_price,
+                    is_spot,
+                    session,
+                    update.executed_qty,
+                )
             elif update.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
                 await self._handle_cancelled(batch, phase, session)
     
-    async def _handle_filled(self, batch, phase, filled_price, is_spot, session):
+    async def _handle_filled(self, batch, phase, filled_price, is_spot, session, executed_qty: float | None = None):
         """处理订单成交"""
         if phase == Phase.FIRST_ORDER_WAIT:
             # 第一单成交
             batch.first_side_filled_price = filled_price or batch.contract_price
-            batch.phase = Phase.FIRST_FILLED
-            batch.updated_at = datetime.utcnow()
+            self.set_batch_phase(batch, Phase.FIRST_FILLED, session, trigger='ORDER_FILLED')
             await session.commit()
             
             logger.info(f"Batch {batch.id} first order filled - price={filled_price}")
             
             # 如果第一单是现货，立即转币到savings
             if is_spot:
-                await self._transfer_spot_to_savings(batch)
+                await self._transfer_spot_to_savings(batch, executed_qty)
                 
         elif phase == Phase.SECOND_ORDER_WAIT:
             # 第二单成交 → 完成
             batch.second_side_filled_price = filled_price or batch.spot_price
             batch.execute_status = 'COMPLETED'
             batch.complete_reason = 'SUCCESS'
-            batch.phase = Phase.COMPLETED
-            batch.updated_at = datetime.utcnow()
+            self.set_batch_phase(batch, Phase.COMPLETED, session, trigger='ORDER_FILLED')
             await session.commit()
             
             # 如果第二单是现货，转币到savings
             if is_spot:
-                await self._transfer_spot_to_savings(batch)
+                await self._transfer_spot_to_savings(batch, executed_qty)
             else:
                 # 第二单是合约，检查仓位完成
                 await self._check_position_complete(batch.position_execute_id)
@@ -253,13 +278,11 @@ class BatchExecutionService:
         """处理订单取消/拒绝"""
         if phase == Phase.FIRST_ORDER_WAIT:
             # 回到PENDING，下次调度重试
-            batch.phase = Phase.PENDING
-            batch.updated_at = datetime.utcnow()
+            self.set_batch_phase(batch, Phase.PENDING, session, trigger='ORDER_CANCELLED')
             await session.commit()
         elif phase == Phase.SECOND_ORDER_WAIT:
             # 回到FIRST_FILLED
-            batch.phase = Phase.FIRST_FILLED
-            batch.updated_at = datetime.utcnow()
+            self.set_batch_phase(batch, Phase.FIRST_FILLED, session, trigger='ORDER_CANCELLED')
             await session.commit()
     
     # ==================== 批次管理逻辑 ====================
@@ -284,8 +307,7 @@ class BatchExecutionService:
                 return False
 
             batch.execute_status = 'RUNNING'
-            batch.phase = Phase.PENDING
-            batch.updated_at = datetime.utcnow()
+            self.set_batch_phase(batch, Phase.PENDING, session, trigger='RESET_BATCH')
             await session.commit()
 
             return True
@@ -347,9 +369,16 @@ class BatchExecutionService:
         """Execute current phase through rule executer."""
         await self.rule_executer_service.execute(batch, session, self)
 
-    async def _transfer_spot_to_savings(self, batch: BatchExecute):
+    async def _transfer_spot_to_savings(self, batch: BatchExecute, executed_qty: float | None = None):
         """Transfer spot asset to savings (called when spot order filled)."""
-        spot_quantity = (batch.batch_value or 0) / batch.spot_price if batch.spot_price else 0
+        if executed_qty is not None and executed_qty > 0:
+            spot_quantity = float(executed_qty)
+        else:
+            spot_quantity = (batch.batch_value or 0) / batch.spot_price if batch.spot_price else 0
+
+        if spot_quantity <= 0:
+            raise Exception("Transfer to savings skipped: invalid spot quantity")
+
         transfer_result = await self.arbitrage_service.transfer_to_savings(
             self.trader,
             batch.position.contract,
@@ -468,6 +497,15 @@ class BatchExecutionService:
 
             status = status_data.get('status', 'UNKNOWN')
             avg_price = float(status_data.get('avgPrice', 0))
+            executed_qty_raw = status_data.get('executedQty')
+            if executed_qty_raw is None:
+                executed_qty_raw = status_data.get('cumQty')
+            if executed_qty_raw is None:
+                executed_qty_raw = status_data.get('origQty')
+            try:
+                executed_qty = float(executed_qty_raw) if executed_qty_raw is not None else None
+            except (TypeError, ValueError):
+                executed_qty = None
 
             # 检查是否为终态
             if status == 'FILLED':
@@ -476,6 +514,7 @@ class BatchExecutionService:
                     symbol=batch.position.contract,
                     status=OrderStatus.FILLED,
                     avg_price=avg_price,
+                    executed_qty=executed_qty,
                     batch_id=batch.id,
                     phase=batch.phase,
                     is_spot=is_spot

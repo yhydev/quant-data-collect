@@ -2,11 +2,13 @@
 Order sequence plugins for Binance Arbitrage Platform.
 Defines the order in which trades are executed.
 """
+from decimal import Decimal
+
 from models.interfaces import IOrderPlugin, OrderSequence, InitialParams
 
-FUTURES_OPEN_MULTIPLIER = 1.002
-SPOT_OPEN_MULTIPLIER = 0.998
-SLIPPAGE = 0.001  # 0.1%
+FUTURES_OPEN_MULTIPLIER = Decimal("1.002")
+SPOT_OPEN_MULTIPLIER = Decimal("0.998")
+SLIPPAGE = Decimal("0.001")  # 0.1%
 
 
 class FuturesFirstPlugin(IOrderPlugin):
@@ -17,13 +19,15 @@ class FuturesFirstPlugin(IOrderPlugin):
     
     async def get_initial_params(self, collector, contract: str, batch_value: float) -> InitialParams:
         """Get initial params: futures first, spot second."""
+        _ = batch_value
         contract_ticker = await collector.get_contract_ticker(contract)
-        spot_price_obj = await collector.get_spot_price(contract)
+        base_price = Decimal(str(contract_ticker.mark_price))
 
         # Default open pricing:
+        # use a single base price for both pending orders
         # futures first at +0.2%, then spot at -0.2%
-        contract_price = float(contract_ticker.mark_price * FUTURES_OPEN_MULTIPLIER)
-        spot_price = float(spot_price_obj.ask_price * SPOT_OPEN_MULTIPLIER)
+        contract_price = float(base_price * FUTURES_OPEN_MULTIPLIER)
+        spot_price = float(base_price * SPOT_OPEN_MULTIPLIER)
         
         return InitialParams(
             order_sequence=OrderSequence.FUTURES_FIRST,
@@ -40,12 +44,13 @@ class SpotFirstPlugin(IOrderPlugin):
     
     async def get_initial_params(self, collector, contract: str, batch_value: float) -> InitialParams:
         """Get initial params: spot first, futures second."""
+        _ = batch_value
         contract_ticker = await collector.get_contract_ticker(contract)
-        spot_price_obj = await collector.get_spot_price(contract)
-        
-        # Calculate prices with slippage (spot gets slippage)
-        contract_price = float(contract_ticker.mark_price)
-        spot_price = float(spot_price_obj.ask_price * (1 + SLIPPAGE))
+        base_price = Decimal(str(contract_ticker.mark_price))
+
+        # Use the same base price for both sides (spot gets slippage)
+        contract_price = float(base_price)
+        spot_price = float(base_price * (Decimal("1") + SLIPPAGE))
         
         return InitialParams(
             order_sequence=OrderSequence.SPOT_FIRST,
