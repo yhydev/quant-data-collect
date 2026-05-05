@@ -41,6 +41,14 @@
   cursor: not-allowed;
 }
 
+.spot-only-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #334155;
+  font-size: 13px;
+}
+
 .rates-table h2 {
   margin: 0;
   padding: 12px 16px;

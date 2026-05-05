@@ -30,17 +30,18 @@ export default function FundingRates() {
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  const [spotOnly, setSpotOnly] = useState(true);
 
   useEffect(() => {
     fetchFundingRates();
     const interval = setInterval(fetchFundingRates, 60000);
     return () => clearInterval(interval);
-  }, []);
+  }, [spotOnly]);
 
   const fetchFundingRates = async () => {
     try {
       const [ratesRes, summaryRes] = await Promise.all([
-        fetch('/api/funding-rates'),
+        fetch(`/api/funding-rates?spot_only=${spotOnly}`),
         fetch('/api/funding-rates/summary?days=10'),
       ]);
 
@@ -90,8 +91,11 @@ export default function FundingRates() {
     }
   };
 
+  const spotSymbols = new Set(rates.map((r) => r.symbol.toUpperCase()));
+
   const filteredSummary = (summary?.symbols || [])
     .filter((item) => {
+      if (spotOnly && !spotSymbols.has(item.symbol.toUpperCase())) return false;
       const pct = item.total_rate * 100;
       if (minTotalRatePct !== '' && pct < minTotalRatePct) return false;
       if (maxTotalRatePct !== '' && pct > maxTotalRatePct) return false;
@@ -144,6 +148,15 @@ export default function FundingRates() {
         <button type="button" onClick={handleManualSync} disabled={syncing}>
           {syncing ? '同步中...' : '手动同步费率'}
         </button>
+        <label htmlFor="spot-only" className="spot-only-toggle">
+          <input
+            id="spot-only"
+            type="checkbox"
+            checked={spotOnly}
+            onChange={(e) => setSpotOnly(e.target.checked)}
+          />
+          仅显示有现货交易对
+        </label>
       </div>
       
       {error && <div className="error">{error}</div>}
