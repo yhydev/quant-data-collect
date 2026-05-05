@@ -3,7 +3,6 @@ API routes for Binance Arbitrage Platform.
 """
 from datetime import datetime, timedelta
 from typing import List
-import re
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -28,9 +27,6 @@ class OpenPositionRequest(BaseModel):
     batch_num: int = Field(default=1, ge=1, le=10)
     batch_position_value: float = Field(default=1000, ge=6)
     order_plugin: str = 'futures_first'
-
-
-_CONTRACT_PATTERN = re.compile(r"^[A-Z0-9]{6,20}$")
 
 
 class ClosePositionRequest(BaseModel):
@@ -283,8 +279,6 @@ async def sync_funding_rate_history(days: int = 10):
 async def open_position(request: OpenPositionRequest):
     """Submit open position request."""
     contract = request.contract.strip().upper()
-    if not _CONTRACT_PATTERN.match(contract):
-        raise HTTPException(status_code=400, detail="Invalid contract format")
 
     # Check if already locked
     is_locked = await _lock_manager.is_locked(contract)
@@ -561,8 +555,6 @@ async def get_positions_history(limit: int = 100, offset: int = 0, contract: str
 
         if contract:
             normalized = contract.strip().upper()
-            if not _CONTRACT_PATTERN.match(normalized):
-                raise HTTPException(status_code=400, detail="Invalid contract format")
             query = query.where(PositionExecute.contract == normalized)
 
         result = await session.execute(query)
