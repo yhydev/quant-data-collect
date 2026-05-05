@@ -156,6 +156,8 @@ class BatchExecutionService:
                 elapsed = 0
 
             if batch.phase == Phase.FIRST_ORDER_WAIT and elapsed > (batch.first_order_wait_timeout or 300):
+                await self._cancel_outstanding_orders(batch)
+                self._clear_phase_runtime_data(batch)
                 self.set_batch_phase(batch, Phase.PENDING, session, trigger='FIRST_ORDER_WAIT_TIMEOUT')
                 await session.commit()
                 logger.warning(
@@ -317,15 +319,7 @@ class BatchExecutionService:
                 return False
 
             await self._cancel_outstanding_orders(batch)
-
-            # Reset phase-related runtime data before re-initialization
-            batch.contract_price = None
-            batch.spot_price = None
-            batch.first_side_order_id = None
-            batch.first_side_filled_price = None
-            batch.second_side_order_id = None
-            batch.second_side_filled_price = None
-            batch.complete_reason = None
+            self._clear_phase_runtime_data(batch)
 
             batch.execute_status = 'RUNNING'
             self.set_batch_phase(batch, Phase.PENDING, session, trigger='RESET_BATCH')
@@ -583,6 +577,16 @@ class BatchExecutionService:
                     logger.warning("Batch %s failed cancelling stale order %s: %s", batch.id, order_id, result.message)
             except Exception as exc:
                 logger.warning("Batch %s cancel stale order %s error: %s", batch.id, order_id, exc)
+
+    def _clear_phase_runtime_data(self, batch: BatchExecute) -> None:
+        """Clear runtime fields so pending phase can reinitialize cleanly."""
+        batch.contract_price = None
+        batch.spot_price = None
+        batch.first_side_order_id = None
+        batch.first_side_filled_price = None
+        batch.second_side_order_id = None
+        batch.second_side_filled_price = None
+        batch.complete_reason = None
 
     async def _poll_single_order(self, batch: BatchExecute, order_id: str, is_spot: bool):
         """轮询单个订单，触发业务逻辑"""
