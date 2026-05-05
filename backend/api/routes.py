@@ -149,11 +149,14 @@ class HealthResponse(BaseModel):
 # Routes
 
 @router.get("/funding-rates", response_model=List[FundingRateResponse])
-async def get_funding_rates():
-    """Get current funding rates."""
+async def get_funding_rates(spot_only: bool = False):
+    """Get current funding rates. Optionally filter to symbols tradable on spot."""
     collector = create_collector('binance')
     try:
         rates = await collector.get_funding_rates()
+        if spot_only:
+            spot_symbols = {s.upper() for s in await collector.get_spot_contracts()}
+            rates = [r for r in rates if str(r.symbol).upper() in spot_symbols]
         return [
             FundingRateResponse(
                 symbol=r.symbol,

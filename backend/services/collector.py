@@ -144,6 +144,24 @@ class BinanceCollector(ICollector):
             logger.warning(f"Error getting contracts: {e}")
             return []
 
+    async def get_spot_contracts(self) -> List[str]:
+        """Get all spot tradable USDT symbols."""
+        try:
+            session = await self._get_session()
+            async with session.get(f"{self.base_url}/v3/exchangeInfo") as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+
+            symbols = []
+            for item in data.get('symbols', []):
+                if item.get('quoteAsset') == 'USDT' and item.get('status') == 'TRADING':
+                    symbols.append(item.get('symbol'))
+            return symbols
+        except Exception as e:
+            logger.warning(f"Error getting spot contracts: {e}")
+            return []
+
     async def get_funding_rate_history_window(
         self,
         start_time_ms: int,
@@ -213,6 +231,9 @@ class MockCollector(ICollector):
         }
         mark, index = prices.get(symbol, ('0', '0'))
         return ContractTicker(symbol, Decimal(mark), Decimal(index))
+
+    async def get_spot_contracts(self) -> List[str]:
+        return ['BTCUSDT', 'ETHUSDT', 'BNBUSDT']
 
     async def get_funding_rate_history_window(
         self,

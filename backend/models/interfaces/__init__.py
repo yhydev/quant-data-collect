@@ -98,6 +98,11 @@ class ICollector(ABC):
         """Get contract ticker (mark price, index price)."""
         pass
 
+    @abstractmethod
+    async def get_spot_contracts(self) -> List[str]:
+        """Get spot tradable USDT symbols."""
+        pass
+
 
 class ITrader(ABC):
     """Trading execution interface."""
