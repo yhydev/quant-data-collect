@@ -27,7 +27,9 @@ export default function FundingRates() {
   const [minTotalRatePct, setMinTotalRatePct] = useState<number | ''>('');
   const [maxTotalRatePct, setMaxTotalRatePct] = useState<number | ''>('');
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
 
   useEffect(() => {
     fetchFundingRates();
@@ -60,6 +62,32 @@ export default function FundingRates() {
   const handleRefresh = async () => {
     setLoading(true);
     await fetchFundingRates();
+  };
+
+  const handleManualSync = async () => {
+    try {
+      setSyncing(true);
+      setError(null);
+      setSyncMessage(null);
+
+      const response = await fetch('/api/funding-rates/sync?days=10', {
+        method: 'POST',
+      });
+
+      if (!response.ok) throw new Error('Failed to sync funding history');
+
+      const result = await response.json();
+      const inserted = result?.sync?.inserted ?? 0;
+      const fetched = result?.sync?.fetched ?? 0;
+      const cleaned = result?.cleaned_invalid_rows ?? 0;
+      setSyncMessage(`同步完成：新增 ${inserted} 条，抓取 ${fetched} 条，清理 ${cleaned} 条无效数据`);
+
+      await fetchFundingRates();
+    } catch (err) {
+      setError('手动同步失败，请稍后重试');
+    } finally {
+      setSyncing(false);
+    }
   };
 
   const filteredSummary = (summary?.symbols || [])
@@ -113,9 +141,13 @@ export default function FundingRates() {
           onChange={(e) => setMaxTotalRatePct(e.target.value === '' ? '' : Number(e.target.value))}
         />
         <button type="button" onClick={handleRefresh}>刷新数据</button>
+        <button type="button" onClick={handleManualSync} disabled={syncing}>
+          {syncing ? '同步中...' : '手动同步费率'}
+        </button>
       </div>
       
       {error && <div className="error">{error}</div>}
+      {syncMessage && <div className="sync-success">{syncMessage}</div>}
 
       <div className="rates-table">
         <h2>近10天合约资金费率汇总（从高到低）</h2>

@@ -65,6 +65,7 @@ class BatchResponse(BaseModel):
     id: int
     position_execute_id: int
     timeout: int
+    first_order_wait_timeout: int
     execute_status: str
     offset: str
     order_sequence: str | None
@@ -315,6 +316,7 @@ async def open_position(request: OpenPositionRequest):
                 batch = BatchExecute(
                     position_execute_id=pos.id,
                     timeout=3600,
+                    first_order_wait_timeout=300,
                     offset='OPEN',
                     execute_status='PENDING',
                     phase='PENDING',
@@ -473,6 +475,7 @@ async def close_position(request: ClosePositionRequest):
                 batch = BatchExecute(
                     position_execute_id=close_pos.id,
                     timeout=3600,
+                    first_order_wait_timeout=300,
                     offset='CLOSE',
                     execute_status='PENDING',
                     phase='PENDING',
@@ -578,6 +581,7 @@ async def get_positions_history(limit: int = 100, offset: int = 0, contract: str
                     id=b.id,
                     position_execute_id=b.position_execute_id,
                     timeout=b.timeout,
+                    first_order_wait_timeout=b.first_order_wait_timeout,
                     execute_status=b.execute_status,
                     offset=b.offset,
                     order_sequence=b.order_sequence,

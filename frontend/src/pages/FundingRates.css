@@ -36,6 +36,11 @@
   cursor: pointer;
 }
 
+.summary-controls button:disabled {
+  background: #91caff;
+  cursor: not-allowed;
+}
+
 .rates-table h2 {
   margin: 0;
   padding: 12px 16px;
@@ -102,5 +107,14 @@
   border: 1px solid #ffccc7;
   border-radius: 4px;
   color: #ff4d4f;
+  margin-bottom: 20px;
+}
+
+.sync-success {
+  padding: 12px 16px;
+  background: #f6ffed;
+  border: 1px solid #b7eb8f;
+  border-radius: 4px;
+  color: #389e0d;
   margin-bottom: 20px;
 }

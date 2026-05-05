@@ -38,6 +38,7 @@ class BatchExecute(Base):
     id = Column(Integer, primary_key=True)
     position_execute_id = Column(Integer, ForeignKey('position_execute.id'), nullable=False)
     timeout = Column(Integer, default=3600)        # 成交超时时间(秒)
+    first_order_wait_timeout = Column(Integer, default=300)  # FIRST_ORDER_WAIT 超时时间(秒)
     execute_status = Column(String(20), default='PENDING')  # PENDING | RUNNING | COMPLETED
     offset = Column(String(10), nullable=False)    # OPEN | CLOSE
     order_sequence = Column(String(20))            # 先做哪边: FUTURES_FIRST | SPOT_FIRST
@@ -297,11 +298,13 @@ class DBHelper:
     
     @staticmethod
     async def create_batch_execute(session: AsyncSession, position_execute_id: int,
-                           timeout: int = 3600) -> BatchExecute:
+                           timeout: int = 3600,
+                           first_order_wait_timeout: int = 300) -> BatchExecute:
         """Create batch execute record."""
         batch = BatchExecute(
             position_execute_id=position_execute_id,
             timeout=timeout,
+            first_order_wait_timeout=first_order_wait_timeout,
             execute_status='PENDING',
             phase='PENDING'
         )
