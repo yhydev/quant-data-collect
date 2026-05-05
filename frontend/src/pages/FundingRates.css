@@ -1,0 +1,128 @@
+.funding-rates {
+  padding: 20px;
+}
+
+.funding-rates h1 {
+  margin: 0 0 10px 0;
+  font-size: 24px;
+  color: #333;
+}
+
+.subtitle {
+  color: #666;
+  margin-bottom: 20px;
+}
+
+.summary-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.summary-controls input {
+  width: 90px;
+  padding: 6px 8px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+}
+
+.summary-controls button {
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: #1677ff;
+  color: #fff;
+  cursor: pointer;
+}
+
+.summary-controls button:disabled {
+  background: #91caff;
+  cursor: not-allowed;
+}
+
+.spot-only-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #334155;
+  font-size: 13px;
+}
+
+.rates-table h2 {
+  margin: 0;
+  padding: 12px 16px;
+  font-size: 16px;
+  border-bottom: 1px solid #eee;
+}
+
+.rates-table {
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  overflow: hidden;
+}
+
+.rates-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.rates-table th,
+.rates-table td {
+  padding: 12px 16px;
+  text-align: left;
+  border-bottom: 1px solid #eee;
+}
+
+.rates-table th {
+  background: #f8f9fa;
+  font-weight: 600;
+  color: #333;
+}
+
+.rates-table .symbol {
+  font-weight: 500;
+}
+
+.rates-table .rate.positive {
+  color: #52c41a;
+}
+
+.rates-table .rate.negative {
+  color: #ff4d4f;
+}
+
+.rates-table .high-rate {
+  background: #f6ffed;
+}
+
+.rates-table .time {
+  color: #666;
+  font-size: 14px;
+}
+
+.loading,
+.no-data {
+  padding: 40px;
+  text-align: center;
+  color: #999;
+}
+
+.error {
+  padding: 12px 16px;
+  background: #fff2f0;
+  border: 1px solid #ffccc7;
+  border-radius: 4px;
+  color: #ff4d4f;
+  margin-bottom: 20px;
+}
+
+.sync-success {
+  padding: 12px 16px;
+  background: #f6ffed;
+  border: 1px solid #b7eb8f;
+  border-radius: 4px;
+  color: #389e0d;
+  margin-bottom: 20px;
+}
