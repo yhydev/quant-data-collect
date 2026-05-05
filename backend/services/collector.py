@@ -144,6 +144,35 @@ class BinanceCollector(ICollector):
             logger.warning(f"Error getting contracts: {e}")
             return []
 
+    async def get_funding_rate_history_window(
+        self,
+        start_time_ms: int,
+        end_time_ms: int,
+        limit: int = 1000,
+    ) -> List[dict]:
+        """Get funding rate history for all symbols in a time window (paginated by caller)."""
+        try:
+            session = await self._get_session()
+            async with session.get(
+                f"{self.futures_url}/v1/fundingRate",
+                params={
+                    'startTime': start_time_ms,
+                    'endTime': end_time_ms,
+                    'limit': max(1, min(limit, 1000)),
+                },
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    logger.warning("Funding history request failed: status=%s body=%s", resp.status, text)
+                    return []
+                data = await resp.json()
+                if isinstance(data, list):
+                    return data
+                return []
+        except Exception as e:
+            logger.error(f"Error getting funding rate history: {e}", exc_info=True)
+            return []
+
 
 # Mock collector for testing without API
 class MockCollector(ICollector):
@@ -184,6 +213,27 @@ class MockCollector(ICollector):
         }
         mark, index = prices.get(symbol, ('0', '0'))
         return ContractTicker(symbol, Decimal(mark), Decimal(index))
+
+    async def get_funding_rate_history_window(
+        self,
+        start_time_ms: int,
+        end_time_ms: int,
+        limit: int = 1000,
+    ) -> List[dict]:
+        _ = limit
+        points = []
+        ts = start_time_ms
+        symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT']
+        while ts <= end_time_ms:
+            for symbol in symbols:
+                points.append({
+                    'symbol': symbol,
+                    'fundingRate': str(self.funding_rates.get(symbol, Decimal('0'))),
+                    'fundingTime': ts,
+                    'markPrice': '0',
+                })
+            ts += 8 * 60 * 60 * 1000
+        return points
 
 
 # Factory function

@@ -1,15 +1,16 @@
 """
 API routes for Binance Arbitrage Platform.
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from models.database import get_async_session, PositionExecute, BatchExecute, Earning
+from models.database import get_async_session, PositionExecute, BatchExecute, Earning, FundingRateHistory
 from models.database import init_db_async
 from services import create_collector, create_trader, PortfolioManager, LockManager
+from services.funding_rate_sync_service import FundingRateSyncService
 from plugins.order_sequence import get_available_plugins, get_plugin
 
 
@@ -110,6 +111,105 @@ async def get_funding_rates():
             )
             for r in rates
         ]
+    finally:
+        await collector.close()
+
+
+@router.get("/funding-rates/summary")
+async def get_funding_rate_summary(days: int = 7):
+    """Get funding rate summary grouped by symbol for recent N days."""
+    if days <= 0 or days > 365:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 365")
+
+    from sqlalchemy import select, func
+
+    start_time = datetime.utcnow() - timedelta(days=days)
+
+    async with get_async_session() as session:
+        result = await session.execute(
+            select(
+                FundingRateHistory.symbol,
+                func.count(FundingRateHistory.id).label("records"),
+                func.sum(FundingRateHistory.rate).label("total_rate"),
+                func.avg(FundingRateHistory.rate).label("avg_rate"),
+                func.max(FundingRateHistory.recorded_at).label("last_recorded_at"),
+            )
+            .where(FundingRateHistory.recorded_at >= start_time)
+            .group_by(FundingRateHistory.symbol)
+            .order_by(func.sum(FundingRateHistory.rate).desc())
+        )
+
+        rows = result.all()
+
+    return {
+        "days": days,
+        "start_time": start_time.isoformat(),
+        "symbols": [
+            {
+                "symbol": row.symbol,
+                "records": int(row.records or 0),
+                "total_rate": float(row.total_rate or 0),
+                "avg_rate": float(row.avg_rate or 0),
+                "last_recorded_at": row.last_recorded_at.isoformat() if row.last_recorded_at else None,
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.get("/funding-rates/history")
+async def get_funding_rate_history(days: int = 10, symbol: str | None = None, limit: int = 5000):
+    """Get funding rate history records from database."""
+    if days <= 0 or days > 30:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 30")
+    if limit <= 0 or limit > 20000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 20000")
+
+    from sqlalchemy import select
+
+    start_time = datetime.utcnow() - timedelta(days=days)
+    start_ts = int(start_time.timestamp())
+
+    async with get_async_session() as session:
+        query = select(FundingRateHistory).where(FundingRateHistory.next_funding_time >= start_ts)
+        if symbol:
+            query = query.where(FundingRateHistory.symbol == symbol.upper())
+        query = query.order_by(FundingRateHistory.next_funding_time.desc()).limit(limit)
+        result = await session.execute(query)
+        rows = list(result.scalars().all())
+
+    return {
+        "days": days,
+        "symbol": symbol.upper() if symbol else None,
+        "count": len(rows),
+        "items": [
+            {
+                "symbol": row.symbol,
+                "funding_rate": row.rate,
+                "funding_time": row.next_funding_time,
+                "recorded_at": row.recorded_at.isoformat() if row.recorded_at else None,
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.post("/funding-rates/sync")
+async def sync_funding_rate_history(days: int = 10):
+    """Manually trigger funding rate history sync for recent N days."""
+    if days <= 0 or days > 30:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 30")
+
+    collector = create_collector('binance')
+    try:
+        service = FundingRateSyncService(collector=collector, days=days, page_limit=1000)
+        inserted = await service.sync_recent_window()
+        cleaned = await service.cleanup_invalid_rows()
+        return {
+            "status": "success",
+            "sync": inserted,
+            "cleaned_invalid_rows": cleaned,
+        }
     finally:
         await collector.close()
 

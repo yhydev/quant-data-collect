@@ -5,7 +5,7 @@ Uses SQLAlchemy 2.0 AsyncORM for PostgreSQL.
 from datetime import datetime
 from typing import Optional, List, AsyncGenerator
 from contextlib import asynccontextmanager
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Text, select
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Text, select, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -108,6 +108,9 @@ class TradingHistory(Base):
 class FundingRateHistory(Base):
     """资金费率历史表"""
     __tablename__ = 'funding_rates_history'
+    __table_args__ = (
+        UniqueConstraint('symbol', 'next_funding_time', name='uq_funding_symbol_time'),
+    )
     
     id = Column(Integer, primary_key=True)
     symbol = Column(String(20), nullable=False)

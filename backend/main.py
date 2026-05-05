@@ -11,6 +11,7 @@ from models.database import init_db_async
 # 导入各层组件
 from scheduler.core import TradingScheduler
 from services.batch_service import BatchExecutionService
+from services.funding_rate_sync_service import FundingRateSyncService
 from events.phase_service import PhaseService, PhaseServiceConfig
 from settings import settings
 
@@ -19,6 +20,7 @@ from settings import settings
 trading_scheduler: TradingScheduler | None = None
 batch_service: BatchExecutionService | None = None
 phase_service: PhaseService | None = None
+funding_rate_sync_service: FundingRateSyncService | None = None
 
 
 def setup_logging() -> None:
@@ -34,7 +36,7 @@ def setup_logging() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
-    global trading_scheduler, batch_service, phase_service
+    global trading_scheduler, batch_service, phase_service, funding_rate_sync_service
     
     # Setup logging
     setup_logging()
@@ -62,6 +64,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     
     # 2. 创建events层（需要batch_service依赖）
     phase_service = PhaseService(batch_service)
+
+    # 2.1 创建资金费率同步服务（每小时全量同步近10天）
+    funding_rate_sync_service = FundingRateSyncService(
+        collector=batch_service.collector,
+        days=10,
+        page_limit=1000,
+    )
     
     # 3. 注入依赖（service -> events）
     batch_service.set_phase_service(phase_service)
@@ -82,6 +91,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     async def poll_orders_callback():
         await batch_service.poll_order_status()
     trading_scheduler.set_poll_callback(poll_orders_callback)
+
+    # Funding rate history sync callback
+    async def funding_sync_callback():
+        try:
+            await funding_rate_sync_service.sync_recent_window()
+        except Exception:
+            logger.exception("Funding rate sync job failed")
+
+    trading_scheduler.set_funding_sync_callback(funding_sync_callback)
     
     # 6. 启动各组件
     await phase_service.start()

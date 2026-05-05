@@ -14,6 +14,7 @@ class TradingScheduler:
         self._wake_callback = None
         self._execute_callback = None
         self._poll_callback = None
+        self._funding_sync_callback = None
     
     def set_wake_callback(self, callback):
         """设置唤醒回调函数（由main.py注入）
@@ -32,6 +33,10 @@ class TradingScheduler:
         callback签名：async def callback()
         """
         self._poll_callback = callback
+
+    def set_funding_sync_callback(self, callback):
+        """设置资金费率历史同步回调函数（每小时）"""
+        self._funding_sync_callback = callback
     
     def start(self):
         """启动调度器 - 注册所有定时任务"""
@@ -64,6 +69,15 @@ class TradingScheduler:
                 id='poll_order_status',
                 replace_existing=True
             )
+
+        # 资金费率历史同步任务（每小时）
+        if self._funding_sync_callback:
+            self.scheduler.add_job(
+                self._funding_sync_trigger,
+                trigger=IntervalTrigger(hours=1),
+                id='sync_funding_rate_history',
+                replace_existing=True
+            )
         
         self.scheduler.start()
         print("TradingScheduler started with 3 tasks")
@@ -87,3 +101,8 @@ class TradingScheduler:
         """定时触发订单轮询 - 只调用回调函数"""
         if self._poll_callback:
             await self._poll_callback()
+
+    async def _funding_sync_trigger(self):
+        """定时触发资金费率历史同步 - 只调用回调函数"""
+        if self._funding_sync_callback:
+            await self._funding_sync_callback()
