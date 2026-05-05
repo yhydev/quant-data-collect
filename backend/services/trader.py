@@ -51,6 +51,21 @@ class BinanceTrader(ITrader):
 
         return Decimal('0.000001')
 
+    async def _get_price_tick(self, symbol: str, is_spot: bool) -> Decimal:
+        """Get PRICE_FILTER tickSize for symbol."""
+        client = await self._get_client()
+        data = await (client.get_exchange_info() if is_spot else client.futures_exchange_info())
+
+        for item in data.get('symbols', []):
+            if item.get('symbol') != symbol:
+                continue
+            for f in item.get('filters', []):
+                if f.get('filterType') == 'PRICE_FILTER':
+                    return Decimal(str(f.get('tickSize', '0.000001')))
+            break
+
+        return Decimal('0.000001')
+
     def _floor_to_step(self, quantity: Decimal, step: Decimal) -> Decimal:
         """Floor quantity to exchange step size."""
         if step <= 0:
@@ -66,6 +81,11 @@ class BinanceTrader(ITrader):
     def _format_quantity(self, quantity: Decimal) -> str:
         """Format quantity to Binance-friendly string."""
         return format(quantity.normalize(), 'f')
+
+    def _format_price(self, price: Decimal, tick: Decimal) -> str:
+        """Format price with exchange tick precision."""
+        adjusted = self._floor_to_step(price, tick)
+        return format(adjusted.normalize(), 'f')
 
     def _format_exception_message(self, error: Exception) -> str:
         """Format exception details for consistent API error output."""
@@ -89,6 +109,7 @@ class BinanceTrader(ITrader):
             client = await self._get_client()
             
             step = await self._get_lot_step(symbol, is_spot=False)
+            tick = await self._get_price_tick(symbol, is_spot=False)
             raw_quantity = Decimal(str(amount)) / Decimal(str(price))
             quantity = self._ceil_to_step(raw_quantity, step)
             if quantity <= 0:
@@ -101,7 +122,7 @@ class BinanceTrader(ITrader):
                 type='LIMIT',
                 timeInForce='GTC',
                 quantity=self._format_quantity(quantity),
-                price=str(price),
+                price=self._format_price(Decimal(str(price)), tick),
             )
             return TradeResult(
                 success=True,
@@ -163,6 +184,7 @@ class BinanceTrader(ITrader):
             client = await self._get_client()
             
             step = await self._get_lot_step(symbol, is_spot=True)
+            tick = await self._get_price_tick(symbol, is_spot=True)
             raw_quantity = Decimal(str(amount)) / Decimal(str(price))
             quantity = self._ceil_to_step(raw_quantity, step)
             if quantity <= 0:
@@ -174,7 +196,7 @@ class BinanceTrader(ITrader):
                 type='LIMIT',
                 timeInForce='GTC',
                 quantity=self._format_quantity(quantity),
-                price=str(price),
+                price=self._format_price(Decimal(str(price)), tick),
             )
             return TradeResult(success=True, order_id=data.get('orderId'), message="Order placed")
         except Exception as e:
