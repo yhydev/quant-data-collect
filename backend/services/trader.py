@@ -11,6 +11,7 @@ import aiohttp
 import hashlib
 import hmac
 from models.interfaces import ITrader, TradeResult
+from settings import settings
 
 
 class BinanceTrader(ITrader):
@@ -18,8 +19,10 @@ class BinanceTrader(ITrader):
     
     def __init__(self, api_key: str = None, api_secret: str = None,
                  testnet: bool = False):
-        self.api_key = api_key or os.getenv('BINANCE_API_KEY', '')
-        self.api_secret = api_secret or os.getenv('BINANCE_SECRET_KEY', '')
+        self.api_key = api_key or settings.get('binance.api_key', os.getenv('BINANCE_API_KEY', ''))
+        self.api_secret = api_secret or settings.get('binance.secret_key', os.getenv('BINANCE_SECRET_KEY', ''))
+        testnet = bool(settings.get('binance.testnet', testnet))
+        self.proxy = settings.get('binance.auth_http_proxy', '').strip() or None
         
         if testnet:
             self.base_url = "https://testnet.binance.vision/api"
@@ -82,7 +85,8 @@ class BinanceTrader(ITrader):
             async with session.post(
                 f"{self.futures_url}/v1/order",
                 params=params,
-                headers=self._headers()
+                headers=self._headers(),
+                proxy=self.proxy,
             ) as resp:
                 if resp.status in [200, 201]:
                     data = await resp.json()
@@ -115,7 +119,8 @@ class BinanceTrader(ITrader):
             async with session.get(
                 f"{self.futures_url}/v2/positionRisk",
                 params=params,
-                headers=self._headers()
+                headers=self._headers(),
+                proxy=self.proxy,
             ) as resp:
                 if resp.status != 200:
                     return TradeResult(success=False, message="Failed to get position")
@@ -146,7 +151,8 @@ class BinanceTrader(ITrader):
             async with session.post(
                 f"{self.futures_url}/v1/order",
                 params=params,
-                headers=self._headers()
+                headers=self._headers(),
+                proxy=self.proxy,
             ) as resp:
                 if resp.status in [200, 201]:
                     data = await resp.json()
@@ -185,7 +191,8 @@ class BinanceTrader(ITrader):
             async with session.post(
                 f"{self.base_url}/v3/order",
                 params=params,
-                headers=self._headers()
+                headers=self._headers(),
+                proxy=self.proxy,
             ) as resp:
                 if resp.status in [200, 201]:
                     data = await resp.json()
@@ -214,7 +221,8 @@ class BinanceTrader(ITrader):
             async with session.get(
                 f"{self.base_url}/v3/account",
                 params=params,
-                headers=self._headers()
+                headers=self._headers(),
+                proxy=self.proxy,
             ) as resp:
                 if resp.status != 200:
                     return TradeResult(success=False, message="Failed to get account")
@@ -242,7 +250,8 @@ class BinanceTrader(ITrader):
             async with session.post(
                 f"{self.base_url}/v3/order",
                 params=params,
-                headers=self._headers()
+                headers=self._headers(),
+                proxy=self.proxy,
             ) as resp:
                 if resp.status in [200, 201]:
                     data = await resp.json()
@@ -280,7 +289,8 @@ class BinanceTrader(ITrader):
             async with session.post(
                 f"{self.base_url}/v3/asset/transfer",
                 params=params,
-                headers=self._headers()
+                headers=self._headers(),
+                proxy=self.proxy,
             ) as resp:
                 if resp.status in [200, 201]:
                     return TradeResult(success=True, message="Transferred to savings")
@@ -308,7 +318,8 @@ class BinanceTrader(ITrader):
             async with session.post(
                 f"{self.base_url}/v3/asset/transfer",
                 params=params,
-                headers=self._headers()
+                headers=self._headers(),
+                proxy=self.proxy,
             ) as resp:
                 if resp.status in [200, 201]:
                     return TradeResult(success=True, message="Transferred from savings")
@@ -341,7 +352,8 @@ class BinanceTrader(ITrader):
             async with session.get(
                 url,
                 params=params,
-                headers=self._headers()
+                headers=self._headers(),
+                proxy=self.proxy,
             ) as resp:
                 if resp.status == 200:
                     return await resp.json()

@@ -275,38 +275,37 @@ class LockManager:
     
     async def acquire(self, symbol: str, operation: str) -> bool:
         """Try to acquire lock for symbol."""
-        from ..database import LockInfo
-        from sqlalchemy import and_, select
+        from models.database import LockInfo
+        from sqlalchemy import select
         
         async with get_async_session() as session:
-            # Check if already locked
             result = await session.execute(
-                select(LockInfo).where(
-                    and_(
-                        LockInfo.symbol == symbol,
-                        LockInfo.locked == True
-                    )
-                )
+                select(LockInfo).where(LockInfo.symbol == symbol)
             )
             existing = result.scalar_one_or_none()
-            
+
             if existing:
-                return False
-            
-            # Create new lock
-            lock = LockInfo(
-                symbol=symbol,
-                operation=operation,
-                locked=True,
-                locked_at=datetime.utcnow()
-            )
-            session.add(lock)
+                if existing.locked:
+                    return False
+                existing.operation = operation
+                existing.locked = True
+                existing.locked_at = datetime.utcnow()
+                existing.released_at = None
+            else:
+                lock = LockInfo(
+                    symbol=symbol,
+                    operation=operation,
+                    locked=True,
+                    locked_at=datetime.utcnow()
+                )
+                session.add(lock)
+
             await session.commit()
             return True
     
     async def release(self, symbol: str) -> None:
         """Release lock for symbol."""
-        from ..database import LockInfo
+        from models.database import LockInfo
         from sqlalchemy import select
         
         async with get_async_session() as session:
@@ -322,7 +321,7 @@ class LockManager:
     
     async def is_locked(self, symbol: str) -> bool:
         """Check if symbol is locked (async version)."""
-        from ..database import LockInfo
+        from models.database import LockInfo
         from sqlalchemy import select
         
         async with get_async_session() as session:

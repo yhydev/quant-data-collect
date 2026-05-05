@@ -14,6 +14,7 @@ from models.database import get_async_session, BatchExecute, PositionExecute
 from events.order_watcher import OrderUpdate, OrderStatus
 from services import create_collector, create_trader
 from plugins.order_sequence import get_plugin
+from services.rule_executer_service import RuleExecuterService
 
 # Phase constants (replacing PhaseState from state machine)
 class Phase:
@@ -46,6 +47,12 @@ class BatchExecutionService:
         self.collector = create_collector(collector_type)
         self.trader = create_trader(trader_type)
         self.order_plugin = get_plugin(order_plugin_name)
+        self.phase_service = None
+        self.rule_executer_service = RuleExecuterService()
+
+    def set_phase_service(self, phase_service) -> None:
+        """Set phase service reference for compatibility."""
+        self.phase_service = phase_service
 
     # ==================== 批次唤醒逻辑 ====================
 
@@ -120,8 +127,12 @@ class BatchExecutionService:
             if batch.execute_status == 'COMPLETED':
                 return False
 
-            # Check timeout
-            elapsed = (datetime.utcnow() - batch.updated_at).total_seconds()
+            # Check timeout (only while waiting for order fills)
+            if self._is_wait_phase(batch.phase) and batch.updated_at:
+                elapsed = (datetime.utcnow() - batch.updated_at).total_seconds()
+            else:
+                elapsed = 0
+
             if elapsed > batch.timeout:
                 batch.execute_status = 'COMPLETED'
                 batch.complete_reason = 'TIMEOUT'
@@ -328,117 +339,11 @@ class BatchExecutionService:
 
             return False
 
-    # ==================== 核心：阶段执行（直接if-else，无状态机） ====================
+    # ==================== 核心：阶段执行（规则执行器） ====================
 
     async def _execute_current_phase(self, batch: BatchExecute, session):
-        """Execute current phase based on batch.phase (no state machine)."""
-        phase = batch.phase
-
-        if phase == Phase.PENDING:
-            await self._initialize_params(batch, session)
-
-        elif phase == Phase.FIRST_ORDER_OPEN:
-            await self._open_first_order(batch, session)
-
-        elif phase == Phase.FIRST_ORDER_WAIT:
-            # Already watching, just wait
-            pass
-
-        elif phase == Phase.FIRST_FILLED:
-            # Proceed to second order
-            batch.phase = Phase.SECOND_ORDER_OPEN
-            batch.updated_at = datetime.utcnow()
-            await session.commit()
-
-        elif phase == Phase.SECOND_ORDER_OPEN:
-            await self._open_second_order(batch, session)
-
-        elif phase == Phase.SECOND_ORDER_WAIT:
-            # Already watching, just wait
-            pass
-
-        elif phase == Phase.COMPLETED:
-            pass
-
-    # ==================== 阶段具体实现 ====================
-
-    async def _initialize_params(self, batch: BatchExecute, session):
-        """Initialize trading parameters (PENDING -> FIRST_ORDER_OPEN)."""
-        contract = batch.position.contract
-        
-        # Get initial params from plugin (one call for order sequence + prices)
-        params = await self.order_plugin.get_initial_params(
-            self.collector, contract, batch.batch_value
-        )
-        
-        # Update batch
-        batch.order_sequence = params.order_sequence.value
-        batch.contract_price = params.contract_price
-        batch.spot_price = params.spot_price
-        batch.phase = Phase.FIRST_ORDER_OPEN
-        batch.updated_at = datetime.utcnow()
-        await session.commit()
-        
-        logger.info(f"Batch {batch.id}: params init - "
-                   f"order={params.order_sequence.value}, "
-                   f"contract={params.contract_price}, spot={params.spot_price}")
-
-    async def _open_first_order(self, batch: BatchExecute, session):
-        """Open first order (FIRST_ORDER_OPEN -> FIRST_ORDER_WAIT)."""
-        amount = batch.batch_value
-
-        if batch.order_sequence == 'futures_first':
-            result = await self.trader.open_futures_short(
-                batch.position.contract,
-                amount,
-                batch.contract_price
-            )
-        else:
-            result = await self.trader.buy_spot(
-                batch.position.contract,
-                amount,
-                batch.spot_price
-            )
-
-        if result.success:
-            batch.first_side_order_id = str(result.order_id)
-            batch.phase = Phase.FIRST_ORDER_WAIT
-            batch.updated_at = datetime.utcnow()
-            await session.commit()
-            
-            logger.info(f"Batch {batch.id}: First order placed - {result.order_id}")
-        else:
-            logger.error(f"Batch {batch.id}: First order failed - {result.message}")
-            raise Exception(f"Order failed: {result.message}")
-
-    async def _open_second_order(self, batch: BatchExecute, session):
-        """Open second order (SECOND_ORDER_OPEN -> SECOND_ORDER_WAIT)."""
-        amount = batch.batch_value
-
-        # Second order is opposite of first
-        if batch.order_sequence == 'futures_first':
-            result = await self.trader.buy_spot(
-                batch.position.contract,
-                amount,
-                batch.spot_price
-            )
-        else:
-            result = await self.trader.open_futures_short(
-                batch.position.contract,
-                amount,
-                batch.contract_price
-            )
-
-        if result.success:
-            batch.second_side_order_id = str(result.order_id)
-            batch.phase = Phase.SECOND_ORDER_WAIT
-            batch.updated_at = datetime.utcnow()
-            await session.commit()
-            
-            logger.info(f"Batch {batch.id}: Second order placed - {result.order_id}")
-        else:
-            logger.error(f"Batch {batch.id}: Second order failed - {result.message}")
-            raise Exception(f"Order failed: {result.message}")
+        """Execute current phase through rule executer."""
+        await self.rule_executer_service.execute(batch, session, self)
 
     async def _transfer_spot_to_savings(self, batch: BatchExecute):
         """Transfer spot asset to savings (called when spot order filled)."""
@@ -537,6 +442,10 @@ class BatchExecutionService:
             # 第二单是现货，当且仅当 order_sequence 是 futures_first
             return batch.order_sequence == 'futures_first'
         return False
+
+    def _is_wait_phase(self, phase: str) -> bool:
+        """Only wait phases should be timeout-checked."""
+        return phase in (Phase.FIRST_ORDER_WAIT, Phase.SECOND_ORDER_WAIT)
 
     def _get_order_id(self, batch: BatchExecute) -> str:
         """获取当前等待阶段的订单ID"""

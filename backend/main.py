@@ -1,7 +1,4 @@
-"""
-FastAPI application for Binance Arbitrage Platform.
-"""
-import os
+"""FastAPI application for Binance Arbitrage Platform."""
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -15,12 +12,23 @@ from models.database import init_db_async
 from scheduler.core import TradingScheduler
 from services.batch_service import BatchExecutionService
 from events.phase_service import PhaseService, PhaseServiceConfig
+from settings import settings
 
 
 # Global scheduler instances
 trading_scheduler: TradingScheduler | None = None
 batch_service: BatchExecutionService | None = None
 phase_service: PhaseService | None = None
+
+
+def setup_logging() -> None:
+    """Setup basic logging configuration."""
+    log_level_name = str(settings.get("log_level", "INFO")).upper()
+    log_level = getattr(logging, log_level_name, logging.INFO)
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+    )
 
 
 @asynccontextmanager
@@ -45,10 +53,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ========== 依赖注入：main.py负责组装所有组件 ==========
     
     # 1. 创建services层（BatchExecutionService自己创建依赖）
+    # 使用 mock 模式进行测试，不依赖真实币安API
     batch_service = BatchExecutionService(
-        collector_type='binance',
-        trader_type='binance',
-        order_plugin_name='futures_first'
+        collector_type=settings.get('collector_type', 'mock'),
+        trader_type=settings.get('trader_type', 'mock'),
+        order_plugin_name=settings.get('order_plugin_name', 'futures_first')
     )
     
     # 2. 创建events层（需要batch_service依赖）
@@ -76,7 +85,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     
     # 6. 启动各组件
     await phase_service.start()
-    await batch_service.order_polling.start()
     trading_scheduler.start()
     
     logger.info("All services started")
@@ -102,9 +110,8 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS configuration - use environment variable for allowed origins
-cors_origins = os.getenv('CORS_ORIGINS', 'http://localhost:3000,http://localhost:8000')
-allow_origins = [origin.strip() for origin in cors_origins.split(',')]
+# CORS configuration
+allow_origins = settings.get('cors_origins', ['http://localhost:3000', 'http://localhost:8000'])
 
 app.add_middleware(
     CORSMiddleware,

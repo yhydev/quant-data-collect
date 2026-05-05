@@ -1,10 +1,7 @@
-"""
-Scheduler package for Binance Arbitrage Platform.
-Contains scheduled tasks like wake scheduler and execute scheduler.
-"""
-from .core import WakeScheduler, ExecuteScheduler
+"""Scheduler package exports."""
+
+from .core import TradingScheduler
 
 __all__ = [
-    'WakeScheduler',
-    'ExecuteScheduler',
+    'TradingScheduler',
 ]

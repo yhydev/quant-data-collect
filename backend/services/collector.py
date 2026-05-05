@@ -11,6 +11,7 @@ import aiohttp
 import logging
 
 from models.interfaces import ICollector, FundingRate, SpotPrice, ContractTicker
+from settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,9 @@ class BinanceCollector(ICollector):
     
     def __init__(self, api_key: str = None, api_secret: str = None,
                  testnet: bool = False):
-        self.api_key = api_key or os.getenv('BINANCE_API_KEY', '')
-        self.api_secret = api_secret or os.getenv('BINANCE_SECRET_KEY', '')
+        self.api_key = api_key or settings.get('binance.api_key', os.getenv('BINANCE_API_KEY', ''))
+        self.api_secret = api_secret or settings.get('binance.secret_key', os.getenv('BINANCE_SECRET_KEY', ''))
+        testnet = bool(settings.get('binance.testnet', testnet))
         
         if testnet:
             self.base_url = "https://testnet.binance.vision/api"
@@ -51,7 +53,9 @@ class BinanceCollector(ICollector):
         """Get current funding rates for all contracts."""
         try:
             session = await self._get_session()
-            async with session.get(f"{self.futures_url}/v1/premiumIndex") as resp:
+            async with session.get(
+                f"{self.futures_url}/v1/premiumIndex",
+            ) as resp:
                 if resp.status != 200:
                     return []
                 data = await resp.json()
@@ -77,7 +81,7 @@ class BinanceCollector(ICollector):
             
             async with session.get(
                 f"{self.base_url}/v3/ticker/bookTicker",
-                params={'symbol': symbol}
+                params={'symbol': symbol},
             ) as resp:
                 if resp.status != 200:
                     return SpotPrice(symbol, 0, 0)
@@ -99,7 +103,7 @@ class BinanceCollector(ICollector):
             
             async with session.get(
                 f"{self.futures_url}/v1/ticker/price",
-                params={'symbol': symbol}
+                params={'symbol': symbol},
             ) as resp:
                 if resp.status != 200:
                     return ContractTicker(symbol, 0, 0)
@@ -123,7 +127,9 @@ class BinanceCollector(ICollector):
         """Get all available USDT contracts."""
         try:
             session = await self._get_session()
-            async with session.get(f"{self.futures_url}/v1/exchangeInfo") as resp:
+            async with session.get(
+                f"{self.futures_url}/v1/exchangeInfo",
+            ) as resp:
                 if resp.status != 200:
                     return []
                 data = await resp.json()

@@ -2,13 +2,14 @@
 Database layer for Binance Arbitrage Platform.
 Uses SQLAlchemy 2.0 AsyncORM for PostgreSQL.
 """
-import os
 from datetime import datetime
 from typing import Optional, List, AsyncGenerator
+from contextlib import asynccontextmanager
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Text, select
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from settings import settings
 
 Base = declarative_base()
 
@@ -52,7 +53,7 @@ class BatchExecute(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     complete_reason = Column(String(50))         # TIMEOUT | SUCCESS | CANCELLED | ERROR
     
-    position = relationship("PositionExecute", back_populates="batches")
+    position = relationship("PositionExecute", back_populates="batches", lazy="joined")
     orders = relationship("PositionOrder", back_populates="batch")
 
 
@@ -161,21 +162,21 @@ class LockInfo(Base):
 # Database configuration
 def get_database_url() -> str:
     """Get database URL from environment (sync version for compatibility)."""
-    host = os.getenv('POSTGRES_HOST', 'localhost')
-    port = os.getenv('POSTGRES_PORT', '5432')
-    user = os.getenv('POSTGRES_USER', 'postgres')
-    password = os.getenv('POSTGRES_PASSWORD', 'postgres')
-    db = os.getenv('POSTGRES_DB', 'arbitrage')
+    host = settings.get('database.host', 'localhost')
+    port = settings.get('database.port', 5432)
+    user = settings.get('database.user', 'postgres')
+    password = settings.get('database.password', 'postgres')
+    db = settings.get('database.name', 'arbitrage')
     return f"postgresql://{user}:{password}@{host}:{port}/{db}"
 
 
 def get_async_database_url() -> str:
     """Get async database URL from environment."""
-    host = os.getenv('POSTGRES_HOST', 'localhost')
-    port = os.getenv('POSTGRES_PORT', '5432')
-    user = os.getenv('POSTGRES_USER', 'postgres')
-    password = os.getenv('POSTGRES_PASSWORD', 'postgres')
-    db = os.getenv('POSTGRES_DB', 'arbitrage')
+    host = settings.get('database.host', 'localhost')
+    port = settings.get('database.port', 5432)
+    user = settings.get('database.user', 'postgres')
+    password = settings.get('database.password', 'postgres')
+    db = settings.get('database.name', 'arbitrage')
     # asyncpg requires postgresql+asyncpg://
     return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{db}"
 
@@ -192,8 +193,8 @@ async def init_db_async():
     db_url = get_async_database_url()
     
     # Configure connection pool for better performance
-    pool_size = int(os.getenv('DB_POOL_SIZE', '5'))
-    max_overflow = int(os.getenv('DB_MAX_OVERFLOW', '10'))
+    pool_size = int(settings.get('database.pool_size', 5))
+    max_overflow = int(settings.get('database.max_overflow', 10))
     
     _async_engine = create_async_engine(
         db_url,
@@ -215,6 +216,7 @@ async def init_db_async():
     return _async_engine
 
 
+@asynccontextmanager
 async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
     """Get async database session (yield per operation)."""
     global _async_session_factory

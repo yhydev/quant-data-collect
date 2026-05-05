@@ -3,12 +3,14 @@ Phase Service - 简化版，只管理OrderWatcher生命周期
 事件驱动机制已移除，批次执行改为调度器直接调用
 """
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
-from services.batch_service import BatchExecutionService
 from events.order_watcher import SchedulerOrderWatcher
+
+if TYPE_CHECKING:
+    from services.batch_service import BatchExecutionService
 
 
 class PhaseServiceConfig:
@@ -21,7 +23,7 @@ class PhaseService:
     Phase Service - 简化后只管理OrderWatcher
     """
 
-    def __init__(self, batch_service: BatchExecutionService, config: PhaseServiceConfig = None):
+    def __init__(self, batch_service: 'BatchExecutionService', config: PhaseServiceConfig = None):
         """Initialize phase service with batch_service dependency."""
         self.batch_service = batch_service
         self.config = config or PhaseServiceConfig()
