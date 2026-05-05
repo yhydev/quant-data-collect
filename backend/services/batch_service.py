@@ -318,6 +318,15 @@ class BatchExecutionService:
 
             await self._cancel_outstanding_orders(batch)
 
+            # Reset phase-related runtime data before re-initialization
+            batch.contract_price = None
+            batch.spot_price = None
+            batch.first_side_order_id = None
+            batch.first_side_filled_price = None
+            batch.second_side_order_id = None
+            batch.second_side_filled_price = None
+            batch.complete_reason = None
+
             batch.execute_status = 'RUNNING'
             self.set_batch_phase(batch, Phase.PENDING, session, trigger='RESET_BATCH')
             await session.commit()
