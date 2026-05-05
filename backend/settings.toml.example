@@ -1,0 +1,21 @@
+[default]
+log_level = "INFO"
+collector_type = "mock"
+trader_type = "mock"
+order_plugin_name = "futures_first"
+cors_origins = ["http://localhost:3000", "http://localhost:8000"]
+
+[default.database]
+host = "localhost"
+port = 5432
+user = "postgres"
+password = "postgres"
+name = "arbitrage"
+pool_size = 5
+max_overflow = 10
+
+[default.binance]
+api_key = ""
+secret_key = ""
+testnet = false
+auth_http_proxy = ""
