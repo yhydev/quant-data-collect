@@ -41,8 +41,8 @@ def month_span(start: str, end: str):
     return out
 
 
-def http_get(url: str, retries: int = 6, timeout: int = 60):
-    """返回 (status, bytes)；404 直接返回；网络错误重试后抛出"""
+def http_get(url: str, retries: int = 10, timeout: int = 60):
+    """返回 (status, bytes)；404 直接返回；网络错误/5xx 重试后抛出"""
     last = None
     for i in range(retries):
         try:
@@ -52,11 +52,19 @@ def http_get(url: str, retries: int = 6, timeout: int = 60):
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 return 404, b""
+            if e.code in (429, 418):       # 限流：退避拉长
+                time.sleep(min(60, 10 * (i + 1)))
+                last = e
+                continue
+            if e.code >= 500:              # 服务端瞬时错误：退避重试
+                time.sleep(min(30, 3 * (i + 1)))
+                last = e
+                continue
             last = e
             time.sleep(2 * (i + 1))
         except Exception as e:  # 网络抖动
             last = e
-            time.sleep(2 * (i + 1))
+            time.sleep(min(30, 2 * (i + 1)))
     raise RuntimeError(f"download failed after {retries} retries: {url}: {last}")
 
 
@@ -205,6 +213,7 @@ def main():
 
     t0 = time.time()
     results = {}
+    failed: dict = {}
     lock_note = {"n": 0}
 
     def prog(idx, total, sym, n, miss):
@@ -219,8 +228,31 @@ def main():
                           args.include_current): s
                 for i, s in enumerate(symbols)}
         for f in as_completed(futs):
-            sym, recs = f.result()
-            results[sym] = recs
+            sym = futs[f]
+            try:
+                _, recs = f.result()
+                results[sym] = recs
+            except Exception as e:
+                print(f"[FAIL] {sym}: {type(e).__name__}: {e}", flush=True)
+                failed[sym] = str(e)
+
+    # 失败币种整体重试一轮（常见瞬时网络错误）
+    if failed:
+        print(f"[retry-pass] 重试 {len(failed)} 个失败币种 ...", flush=True)
+        with ThreadPoolExecutor(max_workers=args.workers) as ex:
+            futs = {ex.submit(fetch_symbol, s, months, prog, i, len(failed),
+                              args.include_current): s
+                    for i, s in enumerate(sorted(failed))}
+            for f in as_completed(futs):
+                sym = futs[f]
+                try:
+                    _, recs = f.result()
+                    if recs:
+                        results[sym] = recs
+                        del failed[sym]
+                        print(f"[retry-ok] {sym}: {len(recs)} records", flush=True)
+                except Exception as e:
+                    print(f"[retry-fail] {sym}: {type(e).__name__}: {e}", flush=True)
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -236,6 +268,7 @@ def main():
         "start_month": args.start,
         "end_month": args.end,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "failed_symbols": dict(failed),
         "per_symbol": {},
     }
 
@@ -314,6 +347,8 @@ def main():
     el = time.time() - t0
     print(f"[done] {manifest['symbols_with_data']} symbols, {manifest['total_records']} records, "
           f"{el:.0f}s total -> {out}")
+    if failed:
+        print(f"[warn] {len(failed)} symbols failed after retry: {sorted(failed)}", flush=True)
     sys.exit(0 if manifest["symbols_with_data"] else 1)
 
 
