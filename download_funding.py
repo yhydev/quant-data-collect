@@ -71,7 +71,9 @@ def fetch_month_via_api(sym: str, ym: str, timeout=60):
     end_ms = start_ms + 32 * 86400 * 1000  # 宽松上限（下月初）
     out: dict = {}
     cur = start_ms
-    while cur < end_ms:
+    n_attempt = 0
+    while cur < end_ms and n_attempt < 20:
+        n_attempt += 1
         url = f"{FAPI}?symbol={sym}&startTime={cur}&limit=1000"
         try:
             req = urllib.request.Request(url, headers=UA)
@@ -79,6 +81,8 @@ def fetch_month_via_api(sym: str, ym: str, timeout=60):
                 rows = json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
             if e.code in (400, 404):  # 币种已下架/不存在
+                return None
+            if e.code in (451, 403):  # 地理封锁/禁止 → 直接放弃（runner 区域限制）
                 return None
             if e.code in (429, 418):
                 time.sleep(60 if e.code == 418 else 10)
