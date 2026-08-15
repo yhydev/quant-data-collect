@@ -21,7 +21,7 @@ import argparse, csv, io, json, os, sys, time, zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-import urllib.request, urllib.error
+import urllib.request, urllib.error, urllib.parse
 
 BASE = "https://data.binance.vision/data/futures/um/monthly/fundingRate"
 UA = {"User-Agent": "quant-data-collect/1.0"}
@@ -82,7 +82,7 @@ def fetch_month_via_api(sym: str, ym: str, timeout=60):
     n_attempt = 0
     while cur < end_ms and n_attempt < 20:
         n_attempt += 1
-        url = f"{FAPI}?symbol={sym}&startTime={cur}&limit=1000"
+        url = f"{FAPI}?symbol={urllib.parse.quote(sym, safe='')}&startTime={cur}&limit=1000"
         try:
             req = urllib.request.Request(url, headers=UA)
             with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -122,7 +122,7 @@ def fetch_symbol(sym: str, months, progress=None, idx=0, total=1,
     now = datetime.now(timezone.utc)
     cur_month = now.strftime("%Y-%m")
     for ym in months:
-        url = f"{BASE}/{sym}/{sym}-fundingRate-{ym}.zip"
+        url = f"{BASE}/" + urllib.parse.quote(f"{sym}/{sym}-fundingRate-{ym}.zip", safe='/')
         st, data = http_get(url)
         if st != 200:
             n_miss += 1
