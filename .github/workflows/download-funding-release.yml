@@ -1,0 +1,168 @@
+name: funding-rate-full-download
+
+# 全量下载币安 USDT-M 永续 funding rate（data.binance.vision 官方数据站，无鉴权/无地理封锁）
+# 输出：per-symbol parquet + combined parquet + zip，发布为 GitHub Release 资产
+#
+# 触发：
+#   - workflow_dispatch（手动，可传参）
+#   - schedule（每月 1 日 06:00 UTC 自动补新月份）
+#
+# 注意：
+#   - data.binance.vision 当月月度文件通常滞后约 2 周；开 include_current=true 时
+#     当月改用 fapi fundingRate API 补齐（runner 需能访问 fapi.binance.com，
+#     美国区域 runner 可能 451，失败则该月缺失并记入 manifest，不影响历史月份）
+#   - 无任何 secret 要求；release 由 GITHUB_TOKEN 创建
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_month:
+        description: '起始月 YYYY-MM'
+        required: false
+        default: '2024-01'
+      end_month:
+        description: '结束月 YYYY-MM（留空=自动用上一个完整月；填 current=强制含当月走 API）'
+        required: false
+        default: ''
+      symbol_limit:
+        description: '仅处理前 N 个币（冒烟测试用，0=全部）'
+        required: false
+        default: '0'
+      symbols_override:
+        description: '逗号分隔币种覆盖（如 BTCUSDT,ETHUSDT；留空用 symbols.txt 全量）'
+        required: false
+        default: ''
+      include_current:
+        description: '当月 data 站未发布时用 fapi API 补齐'
+        required: false
+        default: 'false'
+      create_release:
+        description: '创建 GitHub Release 并上传资产'
+        required: false
+        default: 'true'
+  schedule:
+    - cron: '0 6 1 * *'   # 每月 1 日 06:00 UTC
+
+permissions:
+  contents: write
+
+concurrency:
+  group: funding-rate-download
+  cancel-in-progress: false
+
+jobs:
+  download-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install --quiet -r requirements.txt
+
+      - name: Resolve end month
+        id: resolve
+        shell: bash
+        run: |
+          END="${{ inputs.end_month }}"
+          if [ -z "$END" ]; then
+            END=$(date -u -d "-1 month" +%Y-%m)     # 上一个完整月（data 站保证有数据）
+          elif [ "$END" = "current" ]; then
+            END=$(date -u +%Y-%m)
+          fi
+          echo "end_month=$END" >> "$GITHUB_OUTPUT"
+          echo "end_month=$END"
+
+      - name: Download funding rates
+        id: download
+        env:
+          SYMBOLS_OVERRIDE: ${{ inputs.symbols_override }}
+          SYMBOL_LIMIT: ${{ inputs.symbol_limit }}
+          INCLUDE_CURRENT: ${{ inputs.include_current }}
+        run: |
+          ARGS=(--start "${{ inputs.start_month }}" --end "${{ steps.resolve.outputs.end_month }}")
+          if [ -n "$SYMBOLS_OVERRIDE" ]; then
+            ARGS+=(--symbols "$SYMBOLS_OVERRIDE")
+          else
+            ARGS+=(--symbols-file symbols.txt)
+          fi
+          if [ "${SYMBOL_LIMIT:-0}" != "0" ]; then
+            ARGS+=(--limit "$SYMBOL_LIMIT")
+          fi
+          if [ "$INCLUDE_CURRENT" = "true" ]; then
+            ARGS+=(--include-current)
+          fi
+          ARGS+=(--workers 16 --out out --zip)
+          echo ">>> python3 download_funding.py ${ARGS[*]}"
+          python3 download_funding.py "${ARGS[@]}"
+          echo "generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact (90 天保留，兜底)
+        uses: actions/upload-artifact@v4
+        with:
+          name: funding-rate-full
+          path: |
+            out/combined.parquet
+            out/per_symbol/
+            out/summary.csv
+            out/manifest.json
+            out/*.zip
+          retention-days: 90
+
+      - name: Show manifest
+        run: |
+          python3 - <<'PY'
+          import json
+          m = json.load(open("out/manifest.json"))
+          print(f"symbols_with_data={m['symbols_with_data']} total_records={m['total_records']}")
+          print(f"range: {min(v['first'] for v in m['per_symbol'].values() if v.get('records'))} .. "
+                f"{max(v['last'] for v in m['per_symbol'].values() if v.get('records'))}")
+          PY
+
+      - name: Create GitHub Release
+        if: inputs.create_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GEN_AT: ${{ steps.download.outputs.generated_at }}
+        run: |
+          set -euo pipefail
+          DATE=$(date -u +%Y-%m-%d)
+          TIME=$(date -u +%H%M)
+          TAG="funding-rate-${DATE}-${TIME}"
+          # 清理旧 release（保留最近 3 个 funding-rate-*）
+          mapfile -t OLD < <(gh release list --limit 50 --json tagName,isPrerelease \
+            --jq '.[].tagName' | grep '^funding-rate-' | head -n -3 || true)
+          for t in "${OLD[@]:-}"; do
+            [ -n "$t" ] && gh release delete "$t" --yes --cleanup-tag || true
+          done
+          gh release create "$TAG" \
+            out/*.zip out/combined.parquet out/summary.csv out/manifest.json \
+            --title "Binance USDT-M funding rate 全量数据 $DATE" \
+            --notes "$(cat <<EOF
+          全量 funding rate 数据（data.binance.vision 月度 + 可选 fapi 当月补齐）
+
+          - 币数: $(python3 -c "import json;print(json.load(open('out/manifest.json'))['symbols_with_data'])")
+          - 总记录数: $(python3 -c "import json;print(json.load(open('out/manifest.json'))['total_records'])")
+          - 范围: $(python3 -c "import json;m=json.load(open('out/manifest.json'));v=[x for x in m['per_symbol'].values() if x.get('records')];print(min(x['first'] for x in v),'..',max(x['last'] for x in v))")
+          - 生成时间: ${GEN_AT}
+
+          文件说明:
+          - funding-rate-full-*.zip: 全部数据打包（combined.parquet + per_symbol/*.parquet + summary.csv + manifest.json）
+          - combined.parquet: 全币种合并表，列 = symbol, date(datetime64[ms,UTC]), funding_rate, funding_interval_hours
+          - per_symbol/: 每币一个 parquet
+          - manifest.json: 元信息（逐币记录数/起止/采样间隔）
+          EOF
+          )"
+          echo "release_url=$(gh release view "$TAG" --json url --jq .url)" >> "$GITHUB_OUTPUT"
+
+      - name: Output release URL
+        if: inputs.create_release == 'true'
+        run: |
+          echo "Release: ${{ steps.release.outputs.release_url }}"
+          echo "RELEASE_URL=${{ steps.release.outputs.release_url }}" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
